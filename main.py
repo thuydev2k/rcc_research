@@ -99,5 +99,5 @@ valid_seg_dataset = SegmentationDataset2D(seg_valid_volume_paths, seg_valid_labe
 train_seg_loader = DataLoader(train_seg_dataset, batch_size=4, shuffle=True, collate_fn=multimodal_collate_fn, num_workers=0)
 valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, collate_fn=multimodal_collate_fn, num_workers=0)
 
-# segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4, n_clinical=128)
+segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4, n_clinical=17)
 inference(valid_seg_loader, valid_seg_dataset, device, out_classes=4)

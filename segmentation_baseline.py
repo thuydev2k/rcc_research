@@ -7,18 +7,15 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from models.UNet import UNet
-from models.clinical_encoder import ClinicalEncoder
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss
     
 def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, n_clinical, stop_training=False):
     model = UNet(out_classes=out_classes, n_clinical=n_clinical).to(device)
-    clinical_model = ClinicalEncoder().to(device)
+   
     # use amp to accelerate training => mixed float16, float32
     scaler = torch.amp.GradScaler(device=device)
 
-    optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(clinical_model.parameters()), lr=lr, weight_decay=1e-6
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-6)
     # learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=lr * 0.01)
 
@@ -41,8 +38,8 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
             print('Early stopping at epoch {}'.format(i))
             break
 
-        train_loss = train_fn(train_loader, model, clinical_model, optimizer, device, criterion, scaler)
-        valid_loss = eval_fn(valid_loader, model, clinical_model, device, criterion)
+        train_loss = train_fn(train_loader, model, optimizer, device, criterion, scaler)
+        valid_loss = eval_fn(valid_loader, model, device, criterion)
 
         if math.isnan(valid_loss) or math.isnan(train_loss):
             print('Early stopping at epoch {} by nan'.format(i))
@@ -52,7 +49,6 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
             save_check = 0
             best_valid_loss = valid_loss
             torch.save({'model': model.state_dict(),
-                        'clinical_model': clinical_model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'scaler': scaler.state_dict(),
                         'lrscheduler': scheduler.state_dict(),
@@ -74,9 +70,8 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
     writer.flush()
     writer.close()
 
-def train_fn(loader, model, clinical_model, optimizer, device, criterion, scaler):
+def train_fn(loader, model, optimizer, device, criterion, scaler):
     model.train()
-    clinical_model.train()
 
     total_loss = 0.0
 
@@ -84,15 +79,23 @@ def train_fn(loader, model, clinical_model, optimizer, device, criterion, scaler
         images = images.to(device)
         labels = labels.to(device)
 
-        for key in clinical_batch:
-            clinical_batch[key] = clinical_batch[key].to(device)
+        clinical_tensor = torch.cat([
+            clinical_batch["numerical"].float(),
+            clinical_batch["comorbidities"].float(),
+            clinical_batch["gender"].unsqueeze(1).float(),
+            clinical_batch["smoking_history"].unsqueeze(1).float(),
+            clinical_batch["surgery_type"].unsqueeze(1).float(),
+            clinical_batch["surgical_approach"].unsqueeze(1).float(),
+            clinical_batch["tumor_histologic_subtype"].unsqueeze(1).float(),
+            clinical_batch["pathology_t_stage"].unsqueeze(1).float()
+        ], dim=1)
 
-        clinical_emb = clinical_model(clinical_batch)
+        clinical_batch = clinical_tensor.to(device)
         
         optimizer.zero_grad()
 
         with torch.amp.autocast(device_type=device):
-            seg_out = model(images, clinical_emb)
+            seg_out = model(images, clinical_batch)
 
             num_classes = seg_out.shape[1]
 
@@ -115,9 +118,8 @@ def train_fn(loader, model, clinical_model, optimizer, device, criterion, scaler
 
     return total_loss / len(loader)
 
-def eval_fn(loader, model, clinical_model, device, criterion):
+def eval_fn(loader, model, device, criterion):
     model.eval()
-    clinical_model.eval()
 
     total_loss = 0.0
 
@@ -126,13 +128,21 @@ def eval_fn(loader, model, clinical_model, device, criterion):
             images = images.to(device)
             labels = labels.to(device)
 
-            for key in clinical_batch:
-                clinical_batch[key] = clinical_batch[key].to(device)
+            clinical_tensor = torch.cat([
+                clinical_batch["numerical"].float(),
+                clinical_batch["comorbidities"].float(),
+                clinical_batch["gender"].unsqueeze(1).float(),
+                clinical_batch["smoking_history"].unsqueeze(1).float(),
+                clinical_batch["surgery_type"].unsqueeze(1).float(),
+                clinical_batch["surgical_approach"].unsqueeze(1).float(),
+                clinical_batch["tumor_histologic_subtype"].unsqueeze(1).float(),
+                clinical_batch["pathology_t_stage"].unsqueeze(1).float()
+            ], dim=1)
 
-            clinical_emb = clinical_model(clinical_batch)
+            clinical_batch = clinical_tensor.to(device)
             
             with torch.amp.autocast(device_type=device):
-                predicted = model(images, clinical_emb)
+                predicted = model(images, clinical_batch)
 
                 num_classes = predicted.shape[1]
 
@@ -145,12 +155,11 @@ def eval_fn(loader, model, clinical_model, device, criterion):
 
     return total_loss / len(loader)
 
-def set_weights(model, clinical_model, optimizer, lr_scheduler, scaler, device):
+def set_weights(model, optimizer, lr_scheduler, scaler, device):
     saved_model = torch.load(f'./saved_model/best_model.pt', map_location=device)
     model.load_state_dict(saved_model['model'])
-    clinical_model.load_state_dict(saved_model['clinical_model'])
     optimizer.load_state_dict(saved_model['optimizer'])
     lr_scheduler.load_state_dict(saved_model['lrscheduler'])
     scaler.load_state_dict(saved_model['scaler'])
 
-    return model, clinical_model, optimizer, lr_scheduler, scaler
+    return model, optimizer, lr_scheduler, scaler
