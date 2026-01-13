@@ -6,9 +6,9 @@ class FiLM(nn.Module):
         super(FiLM, self).__init__()
         
         self.controller = nn.Sequential(
-            nn.Linear(n_clinical, 32),
+            nn.Linear(n_clinical, 128),
             nn.ReLU(),
-            nn.Linear(32, n_features * 2)
+            nn.Linear(128, n_features * 2)
         )
 
     def forward(self, x, clinical_vector):

@@ -56,8 +56,6 @@ class UpBlock(nn.Module):
 class UNet(nn.Module):
     def __init__(self, in_classes=1, out_classes=4, n_clinical=0, up_sample_mode='conv_transpose'):
         super(UNet, self).__init__()
-        self.in_classes = in_classes
-        self.out_classes = out_classes
         self.n_clinical = n_clinical
         self.up_sample_mode = up_sample_mode
 
@@ -69,17 +67,17 @@ class UNet(nn.Module):
 
         # Bottleneck(Downsampling path - Upsampling path, connecting path)
         self.double_conv = DoubleConv(512, 1024)
+        if n_clinical > 0:
+            self.film_bottleneck = FiLM(1024, n_clinical)
 
         # Upsampling Path
-        self.up_conv4 = UpBlock(512 + 1024 + n_clinical, 512, self.up_sample_mode)
+        self.up_conv4 = UpBlock(512 + 1024, 512, self.up_sample_mode)
         self.up_conv3 = UpBlock(256 + 512, 256, self.up_sample_mode)
         self.up_conv2 = UpBlock(128 + 256, 128, self.up_sample_mode)
         self.up_conv1 = UpBlock(128 + 64, 64, self.up_sample_mode)
 
         # Final Convolution
         self.conv_last = nn.Conv2d(64, out_classes, kernel_size=1)
-        # Global average pooling to flatten features
-        # self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
 
     def forward(self, x, clinical_data=None):
         x, skip1_out = self.down_conv1(x, clinical_data)
@@ -88,16 +86,8 @@ class UNet(nn.Module):
         x, skip4_out = self.down_conv4(x, clinical_data)
         
         x = self.double_conv(x)
-
-        # Extract features
-        # bottleneck_features = self.global_pool(x)
-        # bottleneck_features = torch.flatten(bottleneck_features, 1)
-
-        if clinical_data is not None:
-            batch_size, _, h, w = x.shape
-            clinical_expanded = clinical_data.view(batch_size, -1, 1, 1)
-            clinical_expanded = clinical_expanded.expand(-1, -1, h, w)
-            x = torch.cat([x, clinical_expanded], dim=1)
+        if self.n_clinical > 0 and clinical_data is not None:
+            x = self.film_bottleneck(x, clinical_data)
 
         x = self.up_conv4(x, skip4_out)
         x = self.up_conv3(x, skip3_out)
