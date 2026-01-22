@@ -47,22 +47,24 @@ class UNet(nn.Module):
     def __init__(self, in_classes=1, out_classes=4, n_clinical=0, up_sample_mode='conv_transpose'):
         super(UNet, self).__init__()
         self.up_sample_mode = up_sample_mode
+
         # Downsampling Path
         self.down_conv1 = DownBlock(in_classes, 64)
         self.down_conv2 = DownBlock(64, 128)
         self.down_conv3 = DownBlock(128, 256)
         self.down_conv4 = DownBlock(256, 512)
+
         # Bottleneck(Downsampling path - Upsampling path, connecting path)
         self.double_conv = DoubleConv(512, 1024)
+
         # Upsampling Path
         self.up_conv4 = UpBlock(512 + 1024 + n_clinical, 512, self.up_sample_mode)
         self.up_conv3 = UpBlock(256 + 512, 256, self.up_sample_mode)
         self.up_conv2 = UpBlock(128 + 256, 128, self.up_sample_mode)
         self.up_conv1 = UpBlock(128 + 64, 64, self.up_sample_mode)
+
         # Final Convolution
         self.conv_last = nn.Conv2d(64, out_classes, kernel_size=1)
-        # Global average pooling to flatten features
-        # self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
 
     def forward(self, x, clinical_data=None):
         x, skip1_out = self.down_conv1(x)
@@ -71,10 +73,6 @@ class UNet(nn.Module):
         x, skip4_out = self.down_conv4(x)
 
         x = self.double_conv(x)
-
-        # Extract features
-        # bottleneck_features = self.global_pool(x)
-        # bottleneck_features = torch.flatten(bottleneck_features, 1)
 
         if clinical_data is not None:
             batch_size, _, h, w = x.shape
