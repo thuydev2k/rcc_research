@@ -28,26 +28,13 @@ class BiomedCLIPEncoder(nn.Module):
         if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)
 
-        x = self.visual.trunk.patch_embed(x)
+        x = self.visual.trunk.forward_features(x)
 
-        cls_token = self.visual.trunk.cls_token.expand(x.shape[0], -1, -1)
-        x = torch.cat((cls_token, x), dim=1)
+        x = x[:, 1:, :]
+        B, N, C = x.shape
+        H = W = int(N ** 0.5)
+        x = x.transpose(1, 2).reshape(B, C, H, W)
 
-        x = x + self.visual.trunk.pos_embed
-        x = self.visual.trunk.pos_drop(x)
+        x = self.proj(x)
 
-        features = []
-
-        for i, blk in enumerate(self.visual.trunk.blocks):
-            x = blk(x)
-
-            if i in [2,5,8,11]:
-                feat = x[:, 1:, :]
-                B, N, C = feat.shape
-                H = W = int(N ** 0.5)
-                feat = feat.transpose(1, 2).reshape(B, C, H, W)
-                feat = self.proj(feat)
-
-                features.append(feat)
-
-        return features
+        return x

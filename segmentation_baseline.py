@@ -6,11 +6,11 @@ import torch.nn.functional as F
 
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from models.UNet import UNet
+from models.BiomedUNet import BiomedTransUNet
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss
     
 def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, stop_training=False):
-    model = UNet(out_classes=out_classes).to(device)
+    model = BiomedTransUNet(out_classes=out_classes).to(device)
     # use amp to accelerate training => mixed float16, float32
     scaler = torch.amp.GradScaler(device=device)
 

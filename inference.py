@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import torch
 import pandas as pd
 
-from models.UNet import UNet
+from models.BiomedUNet import BiomedTransUNet
 
 selected_class_rgb = [
     [0, 0, 0],          # background (black)
@@ -44,7 +44,7 @@ def DSC_IoU_EachClass_Softmax(predicted, target, out_classes, smooth=1e-10):
     return dice, iou
 
 def inference(valid_loader, valid_set, device, out_classes):
-    best_model = UNet(out_classes=out_classes).to(device)
+    best_model = BiomedTransUNet(out_classes=out_classes).to(device)
     best_checkpoint = torch.load(f'./saved_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
 
