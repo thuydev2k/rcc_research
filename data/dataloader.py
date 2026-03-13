@@ -8,13 +8,15 @@ class SegmentationDataset2D(Dataset):
             self,
             image_paths,
             label_paths,
+            clinical_data_list,
     ):
         self.image_paths = image_paths
         self.label_paths = label_paths
+        self.clinical_data = clinical_data_list
 
         self.samples = []
 
-        for img_path, lbl_path in zip(image_paths, label_paths):
+        for img_path, lbl_path, clinical in zip(image_paths, label_paths, clinical_data_list):
             img = np.load(img_path)['data']     # (D, H, W)
             lbl = np.load(lbl_path)['data']     # (D, H, W)
 
@@ -26,10 +28,10 @@ class SegmentationDataset2D(Dataset):
                 lbl_slice_resized = cv2.resize(
                     lbl[d], (224, 224),
                     interpolation=cv2.INTER_LINEAR)
-                
                 self.samples.append({
                     "image": img_slice_resized,
                     "label": lbl_slice_resized,
+                    "clinical": clinical
                 })
 
     def __len__(self):
@@ -41,4 +43,6 @@ class SegmentationDataset2D(Dataset):
         image = torch.tensor(s["image"], dtype=torch.float32).unsqueeze(0) / 255.0
         label = torch.tensor(s["label"], dtype=torch.long)
 
-        return image, label
+        clinical = s["clinical"]
+
+        return image, label, clinical
