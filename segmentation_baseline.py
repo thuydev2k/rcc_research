@@ -9,8 +9,9 @@ from torch.utils.tensorboard import SummaryWriter
 from models.BiomedUNet import BiomedTransUNet
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss
     
-def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, stop_training=False):
-    model = BiomedTransUNet(out_classes=out_classes).to(device)
+def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, n_clinical, stop_training=False):
+    model = BiomedTransUNet(out_classes=out_classes, n_clinical=n_clinical).to(device)
+   
     # use amp to accelerate training => mixed float16, float32
     scaler = torch.amp.GradScaler(device=device)
 
@@ -74,14 +75,27 @@ def train_fn(loader, model, optimizer, device, criterion, scaler):
 
     total_loss = 0.0
 
-    for images, labels in tqdm(loader):
+    for images, labels, clinical_batch in tqdm(loader):
         images = images.to(device)
         labels = labels.to(device)
 
+        clinical_tensor = torch.cat([
+            clinical_batch["numerical"].float(),
+            clinical_batch["comorbidities"].float(),
+            clinical_batch["gender"].unsqueeze(1).float(),
+            clinical_batch["smoking_history"].unsqueeze(1).float(),
+            clinical_batch["surgery_type"].unsqueeze(1).float(),
+            clinical_batch["surgical_approach"].unsqueeze(1).float(),
+            clinical_batch["tumor_histologic_subtype"].unsqueeze(1).float(),
+            clinical_batch["pathology_t_stage"].unsqueeze(1).float()
+        ], dim=1)
+
+        clinical_batch = clinical_tensor.to(device)
+        
         optimizer.zero_grad()
 
         with torch.amp.autocast(device_type=device):
-            seg_out = model(images)
+            seg_out = model(images, clinical_batch)
 
             num_classes = seg_out.shape[1]
 
@@ -110,12 +124,25 @@ def eval_fn(loader, model, device, criterion):
     total_loss = 0.0
 
     with torch.no_grad():
-        for images, labels in tqdm(loader):
+        for images, labels, clinical_batch in tqdm(loader):
             images = images.to(device)
             labels = labels.to(device)
+
+            clinical_tensor = torch.cat([
+                clinical_batch["numerical"].float(),
+                clinical_batch["comorbidities"].float(),
+                clinical_batch["gender"].unsqueeze(1).float(),
+                clinical_batch["smoking_history"].unsqueeze(1).float(),
+                clinical_batch["surgery_type"].unsqueeze(1).float(),
+                clinical_batch["surgical_approach"].unsqueeze(1).float(),
+                clinical_batch["tumor_histologic_subtype"].unsqueeze(1).float(),
+                clinical_batch["pathology_t_stage"].unsqueeze(1).float()
+            ], dim=1)
+
+            clinical_batch = clinical_tensor.to(device)
             
             with torch.amp.autocast(device_type=device):
-                predicted = model(images)
+                predicted = model(images, clinical_batch)
 
                 num_classes = predicted.shape[1]
 
