@@ -1,22 +1,39 @@
 import torch.nn as nn
 import torch
 from models.biomed_encoder import BiomedCLIPEncoder
+from models.FiLM import FiLM
 import torch.nn.functional as F
 
 class PyramidFeatures(nn.Module):
-    def __init__(self, base_dim=128):
+    def __init__(self, base_dim=128, n_clinical=0):
         super().__init__()
+
+        self.n_clinical = n_clinical
 
         self.conv1 = nn.Conv2d(base_dim, 128, 3, padding=1)
         self.conv2 = nn.Conv2d(128, 256, 3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(256, 512, 3, stride=2, padding=1)
         self.conv4 = nn.Conv2d(512, 512, 3, stride=2, padding=1)
 
-    def forward(self, x):
+        if n_clinical > 0:
+            self.film1 = FiLM(128, n_clinical)
+            self.film2 = FiLM(256, n_clinical)
+            self.film3 = FiLM(512, n_clinical)
+            self.film4 = FiLM(512, n_clinical)
+
+    def forward(self, x, clinical_data=None):
         f1 = self.conv1(x)
+        if self.n_clinical > 0 and clinical_data is not None:
+           f1 = self.film1(f1, clinical_data)
         f2 = self.conv2(f1)
+        if self.n_clinical > 0 and clinical_data is not None:
+           f2 = self.film2(f2, clinical_data)
         f3 = self.conv3(f2)
+        if self.n_clinical > 0 and clinical_data is not None:
+           f3 = self.film3(f3, clinical_data)
         f4 = self.conv4(f3)
+        if self.n_clinical > 0 and clinical_data is not None:
+           f4 = self.film4(f4, clinical_data)
 
         return f1, f2, f3, f4
 
@@ -51,11 +68,11 @@ class UpBlock(nn.Module):
         return x
     
 class BiomedTransUNet(nn.Module):
-    def __init__(self, out_classes=4, embed_dim=128):
+    def __init__(self, out_classes=4, embed_dim=128, n_clinical=0):
         super().__init__()
 
         self.encoder = BiomedCLIPEncoder(embed_dim)
-        self.pyramid = PyramidFeatures(embed_dim)
+        self.pyramid = PyramidFeatures(embed_dim, n_clinical)
 
         self.up1 = UpBlock(512, 512, 256)
         self.up2 = UpBlock(256, 256, 128)
@@ -68,10 +85,10 @@ class BiomedTransUNet(nn.Module):
 
         self.out_conv = nn.Conv2d(16, out_classes, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x, clinical_data=None):
         x = self.encoder(x)
 
-        f1, f2, f3, f4 = self.pyramid(x)
+        f1, f2, f3, f4 = self.pyramid(x, clinical_data)
 
         d1 = self.up1(f4, f3)
         d2 = self.up2(d1, f2)
