@@ -10,10 +10,27 @@ class PyramidFeatures(nn.Module):
 
         self.n_clinical = n_clinical
 
-        self.conv1 = nn.Conv2d(base_dim, 128, 3, padding=1)
-        self.conv2 = nn.Conv2d(128, 256, 3, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(256, 512, 3, stride=2, padding=1)
-        self.conv4 = nn.Conv2d(512, 512, 3, stride=2, padding=1)
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(base_dim, 128, 3, padding=1),
+            nn.BatchNorm2d(128)
+        )
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(128, 256, 3, stride=2, padding=1),
+            nn.BatchNorm2d(256)
+        )
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(256, 512, 3, stride=2, padding=1),
+            nn.BatchNorm2d(512)
+        )
+
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(512, 512, 3, stride=2, padding=1),
+            nn.BatchNorm2d(512)
+        )
+
+        self.relu = nn.ReLU(inplace=True)
 
         if n_clinical > 0:
             self.film1 = FiLM(128, n_clinical)
@@ -25,15 +42,22 @@ class PyramidFeatures(nn.Module):
         f1 = self.conv1(x)
         if self.n_clinical > 0 and clinical_data is not None:
            f1 = self.film1(f1, clinical_data)
+        f1 = self.relu(f1)
+
         f2 = self.conv2(f1)
         if self.n_clinical > 0 and clinical_data is not None:
            f2 = self.film2(f2, clinical_data)
+        f2 = self.relu(f2)
+
         f3 = self.conv3(f2)
         if self.n_clinical > 0 and clinical_data is not None:
            f3 = self.film3(f3, clinical_data)
+        f3 = self.relu(f3)
+
         f4 = self.conv4(f3)
         if self.n_clinical > 0 and clinical_data is not None:
            f4 = self.film4(f4, clinical_data)
+        f4 = self.relu(f4)
 
         return f1, f2, f3, f4
 
@@ -78,10 +102,23 @@ class BiomedTransUNet(nn.Module):
         self.up2 = UpBlock(256, 256, 128)
         self.up3 = UpBlock(128, 128, 64)
 
-        self.final_up1 = nn.ConvTranspose2d(64, 64, 2, stride=2)
-        self.final_up2 = nn.ConvTranspose2d(64, 32, 2, stride=2)  
-        self.final_up3 = nn.ConvTranspose2d(32, 16, 2, stride=2)
-        self.final_up4 = nn.ConvTranspose2d(16, 16, 2, stride=2)
+        self.final_up = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
 
         self.out_conv = nn.Conv2d(16, out_classes, kernel_size=1)
 
@@ -94,11 +131,8 @@ class BiomedTransUNet(nn.Module):
         d2 = self.up2(d1, f2)
         d3 = self.up3(d2, f1)
 
-        d4 = self.final_up1(d3)
-        d5 = self.final_up2(d4)
-        d6 = self.final_up3(d5)
-        d7 = self.final_up4(d6)
+        d_final = self.final_up(d3)
 
-        out = self.out_conv(d7)
+        out = self.out_conv(d_final)
 
         return out
