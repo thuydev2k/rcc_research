@@ -1,6 +1,7 @@
 import torch
 from torch.utils.data import Dataset
 import numpy as np
+import cv2
 
 class SegmentationDataset2D(Dataset):
     def __init__(
@@ -18,9 +19,17 @@ class SegmentationDataset2D(Dataset):
             lbl = np.load(lbl_path)['data']     # (D, H, W)
 
             for d in range(img.shape[0]):
+                img_slice_resized = cv2.resize(
+                    img[d], (224, 224),
+                    interpolation=cv2.INTER_LINEAR)
+
+                lbl_slice_resized = cv2.resize(
+                    lbl[d], (224, 224),
+                    interpolation=cv2.INTER_LINEAR)
+                
                 self.samples.append({
-                    "image": img[d],
-                    "label": lbl[d],
+                    "image": img_slice_resized,
+                    "label": lbl_slice_resized,
                 })
 
     def __len__(self):
