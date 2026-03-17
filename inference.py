@@ -5,6 +5,7 @@ import torch
 import pandas as pd
 
 from models.BiomedUNet import BiomedTransUNet
+from models.clinical_encoder import ClinicalEncoder
 
 selected_class_rgb = [
     [0, 0, 0],          # background (black)
@@ -44,9 +45,11 @@ def DSC_IoU_EachClass_Softmax(predicted, target, out_classes, smooth=1e-10):
     return dice, iou
 
 def inference(valid_loader, valid_set, device, out_classes):
-    best_model = BiomedTransUNet(out_classes=out_classes, n_clinical=17).to(device)
+    best_model = BiomedTransUNet(out_classes=out_classes, n_clinical=128).to(device)
+    clinical_model = ClinicalEncoder().to(device)
     best_checkpoint = torch.load(f'./saved_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
+    clinical_model.load_state_dict(best_checkpoint['clinical_model'])
 
     selected_class = ['background', 'kidney', 'tumor', 'cyst']
     best_model.eval()
@@ -57,21 +60,13 @@ def inference(valid_loader, valid_set, device, out_classes):
         for i in idx_arr:
             image, label, clinical_data = valid_set[i]
             x_tensor = image.to(device).unsqueeze(0)
-            
-            clinical_tensor = torch.cat([
-                clinical_data["numerical"].float(),
-                clinical_data["comorbidities"].float(),
-                clinical_data["gender"].view(1).float(),
-                clinical_data["smoking_history"].view(1).float(),
-                clinical_data["surgery_type"].view(1).float(),
-                clinical_data["surgical_approach"].view(1).float(),
-                clinical_data["tumor_histologic_subtype"].view(1).float(),
-                clinical_data["pathology_t_stage"].view(1).float()
-            ], dim=0)
+            clinical_data = {
+                k: v.to(device).unsqueeze(0)
+                for k, v in clinical_data.items()
+            }
 
-            clinical_batch = clinical_tensor.unsqueeze(0).to(device)
-
-            pred_mask_logits = best_model(x_tensor, clinical_batch)
+            clinical_emb = clinical_model(clinical_data)
+            pred_mask_logits = best_model(x_tensor, clinical_emb)
             pred_mask = pred_mask_logits.detach().squeeze().cpu().numpy()
 
             pred_mask = np.transpose(pred_mask, (1, 2, 0))
@@ -99,26 +94,16 @@ def inference(valid_loader, valid_set, device, out_classes):
             plt.savefig(f'./result/prediction_{i}.png')
 
     predictions = []
+    all_patient_features = []
 
     with torch.no_grad():
         for images, labels, clinical_data in iter(valid_loader):
             images = images.float().to(device)
             labels = labels.to(device)
+            clinical_data = {k: v.to(device) for k, v in clinical_data.items()}
 
-            clinical_tensor = torch.cat([
-                clinical_data["numerical"].float(),
-                clinical_data["comorbidities"].float(),
-                clinical_data["gender"].unsqueeze(1).float(),
-                clinical_data["smoking_history"].unsqueeze(1).float(),
-                clinical_data["surgery_type"].unsqueeze(1).float(),
-                clinical_data["surgical_approach"].unsqueeze(1).float(),
-                clinical_data["tumor_histologic_subtype"].unsqueeze(1).float(),
-                clinical_data["pathology_t_stage"].unsqueeze(1).float()
-            ], dim=1)
-
-            clinical_batch = clinical_tensor.to(device)
-
-            output = best_model(images, clinical_batch)
+            clinical_emb = clinical_model(clinical_data)
+            output = best_model(images, clinical_emb)
 
             dice, iou = DSC_IoU_EachClass_Softmax(output, labels, out_classes=out_classes)
 
@@ -136,6 +121,8 @@ def inference(valid_loader, valid_set, device, out_classes):
         os.mkdir(result_dir)
     df_csv.to_csv(f"{result_dir}/prediction.csv")
 
+    # patient_df_csv = pd.DataFrame(all_patient_features)
+    # patient_df_csv.to_csv(f"{result_dir}/patient_features.csv")
 
     mean_dices = []
     mean_ious = []
