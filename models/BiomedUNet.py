@@ -31,7 +31,7 @@ class PyramidFeatures(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-    def forward(self, x, clinical_data=None):
+    def forward(self, x):
         f1 = self.conv1(x)
         f2 = self.conv2(f1)
         f3 = self.conv3(f2)

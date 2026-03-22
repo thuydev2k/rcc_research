@@ -20,29 +20,38 @@ def colour_code_segmentation(image):
     return x
 
 def DSC_IoU_EachClass_Softmax(predicted, target, out_classes, smooth=1e-10):
-    n_class = out_classes
+    pred = torch.argmax(predicted, dim=1)
 
-    predicted = predicted.squeeze(0)
-    predicted = torch.softmax(predicted, dim=0)
-    predicted = torch.argmax(predicted, dim=0)
+    dice_list = []
+    iou_list = []
+    valid_classes = []
 
-    target = target.squeeze(0)
+    for c in range(out_classes):
 
-    dice = torch.ones(n_class).float()
-    iou = torch.ones(n_class).float()
+        pred_c = (pred == c)
+        target_c = (target == c)
 
-    for i in range(n_class):
-        predicted_temp = torch.eq(predicted, i)
-        target_temp = torch.eq(target, i)
+        if target_c.sum() == 0:
+            continue
 
-        intersection = (predicted_temp & target_temp).float().sum()
-        total = target_temp.float().sum() + predicted_temp.float().sum()
-        union = total - intersection
+        tp = (pred_c & target_c).sum().float()
+        fp = (pred_c & (~target_c)).sum().float()
+        fn = ((~pred_c) & target_c).sum().float()
 
-        dice[i] = (2 * intersection + smooth) / (total + smooth)
-        iou[i] = (intersection + smooth) / (union + smooth)
+        dice_c = 2 * tp / (2 * tp + fp + fn + smooth)
+        iou_c  = tp / (tp + fp + fn + smooth)
+
+        dice_list.append(dice_c)
+        iou_list.append(iou_c)
+        valid_classes.append(c)
+
+    if len(dice_list) == 0:
+        return None, None, None
     
-    return dice, iou
+    dice_tensor = torch.stack(dice_list)
+    iou_tensor  = torch.stack(iou_list)
+
+    return dice_tensor, iou_tensor, valid_classes
 
 def inference(valid_loader, valid_set, device, out_classes):
     best_model = BiomedTransUNet(out_classes=out_classes, n_clinical=128).to(device)
@@ -94,7 +103,6 @@ def inference(valid_loader, valid_set, device, out_classes):
             plt.savefig(f'./result/prediction_{i}.png')
 
     predictions = []
-    all_patient_features = []
 
     with torch.no_grad():
         for images, labels, clinical_data in iter(valid_loader):
@@ -105,12 +113,19 @@ def inference(valid_loader, valid_set, device, out_classes):
             clinical_emb = clinical_model(clinical_data)
             output = best_model(images, clinical_emb)
 
-            dice, iou = DSC_IoU_EachClass_Softmax(output, labels, out_classes=out_classes)
+            dice, iou, valid_classes = DSC_IoU_EachClass_Softmax(output, labels, out_classes=out_classes)
 
             prediction = {}
+
             for idx, class_name in enumerate(selected_class):
-                prediction[f'{class_name.lower()}_dice'] = dice[idx].item()
-                prediction[f'{class_name.lower()}_iou'] = iou[idx].item()
+                prediction[f'{class_name.lower()}_dice'] = np.nan
+                prediction[f'{class_name.lower()}_iou'] = np.nan
+
+            for k, c in enumerate(valid_classes):
+                class_name = selected_class[c]
+
+                prediction[f'{class_name.lower()}_dice'] = dice[k].item()
+                prediction[f'{class_name.lower()}_iou'] = iou[k].item()
 
             predictions.append(prediction)
 
@@ -120,9 +135,6 @@ def inference(valid_loader, valid_set, device, out_classes):
     if not os.path.exists(result_dir):
         os.mkdir(result_dir)
     df_csv.to_csv(f"{result_dir}/prediction.csv")
-
-    # patient_df_csv = pd.DataFrame(all_patient_features)
-    # patient_df_csv.to_csv(f"{result_dir}/patient_features.csv")
 
     mean_dices = []
     mean_ious = []
