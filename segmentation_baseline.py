@@ -85,14 +85,8 @@ def train_fn(loader, model, optimizer, device, criterion, scaler):
 
             num_classes = seg_out.shape[1]
 
-            # lbl_onehot = F.one_hot(labels.long(), num_classes=num_classes)
-            # lbl_onehot = lbl_onehot.permute(0, 3, 1, 2).to(dtype=seg_out.dtype, device=seg_out.device)
-            lbl_onehot = torch.zeros(
-                (labels.size(0), num_classes, labels.size(1), labels.size(2)), 
-                device=labels.device,
-                dtype=torch.float32
-            )
-            lbl_onehot.scatter_(1, labels.unsqueeze(1).long(), 1.0)
+            lbl_onehot = F.one_hot(labels.long(), num_classes=num_classes)
+            lbl_onehot = lbl_onehot.permute(0, 3, 1, 2).to(dtype=seg_out.dtype, device=seg_out.device)
 
             loss = criterion(seg_out, lbl_onehot)
 
