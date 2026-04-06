@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import torch
 import pandas as pd
 
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from models.UNet import UNet
 
 selected_class_rgb = [
@@ -52,9 +53,62 @@ def DSC_IoU_EachClass_Softmax(predicted, target, out_classes, smooth=1e-10):
 
     return dice_tensor, iou_tensor, valid_classes
 
+def update_confusion_matrix_sklearn(total_cm, output, labels, out_classes):
+    pred = torch.argmax(output, dim=1)   # [B, H, W]
+
+    y_true = labels.detach().cpu().numpy().reshape(-1)
+    y_pred = pred.detach().cpu().numpy().reshape(-1)
+
+    valid_mask = (y_true >= 0) & (y_true < out_classes)
+    y_true = y_true[valid_mask]
+    y_pred = y_pred[valid_mask]
+
+    cm_batch = confusion_matrix(
+        y_true,
+        y_pred,
+        labels=np.arange(out_classes)
+    )
+
+    total_cm += cm_batch
+    return total_cm
+
+def metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
+    total = cm.sum()
+    row_sum = cm.sum(axis=1)
+    col_sum = cm.sum(axis=0)
+
+    records = []
+
+    for c, class_name in enumerate(class_names):
+        tp = cm[c, c]
+        fp = col_sum[c] - tp
+        fn = row_sum[c] - tp
+        tn = total - tp - fp - fn
+
+        dice = (2 * tp) / (2 * tp + fp + fn + smooth)
+        iou = tp / (tp + fp + fn + smooth)
+        precision = tp / (tp + fp + smooth)
+        recall = tp / (tp + fn + smooth)
+        specificity = tn / (tn + fp + smooth)
+
+        records.append({
+            "class": class_name,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "tn": tn,
+            "dice_from_cm": dice,
+            "iou_from_cm": iou,
+            "precision": precision,
+            "recall": recall,
+            "specificity": specificity,
+        })
+
+    return pd.DataFrame(records)
+
 def inference(valid_loader, valid_set, device, out_classes):
     best_model = UNet(out_classes=out_classes).to(device)
-    best_checkpoint = torch.load(f'./saved_model/best_model.pt')
+    best_checkpoint = torch.load(f'./saved_UNet_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
 
     selected_class = ['background', 'kidney', 'tumor', 'cyst']
@@ -95,6 +149,7 @@ def inference(valid_loader, valid_set, device, out_classes):
             plt.savefig(f'./result/prediction_{i}.png')
 
     predictions = []
+    total_cm = np.zeros((out_classes, out_classes), dtype=np.int64)
 
     with torch.no_grad():
         for images, labels in iter(valid_loader):
@@ -102,6 +157,8 @@ def inference(valid_loader, valid_set, device, out_classes):
             labels = labels.to(device)
 
             output = best_model(images)
+
+            total_cm = update_confusion_matrix_sklearn(total_cm, output, labels, out_classes)
 
             dice, iou, valid_classes = DSC_IoU_EachClass_Softmax(output, labels, out_classes=out_classes)
 
@@ -140,3 +197,29 @@ def inference(valid_loader, valid_set, device, out_classes):
         print(f'Class: {class_name}, Mean Dice: {mean_dice:.44f}, Mean IoU: {mean_iou:.4f}')
 
     print(f'AVG DSC: {np.mean(mean_dices[1:])}, AVG IoU: {np.mean(mean_ious[1:])}')
+
+    cm_df = pd.DataFrame(total_cm, index=selected_class, columns=selected_class)
+    cm_df.to_csv(f"{result_dir}/confusion_matrix.csv")
+
+    print("\nConfusion Matrix (rows=GT, cols=Pred):")
+    print(cm_df)
+
+    cm_metrics_df = metrics_from_confusion_matrix(total_cm, selected_class)
+    cm_metrics_df.to_csv(f"{result_dir}/metrics_from_confusion_matrix.csv", index=False)
+
+    print("\nMetrics from Confusion Matrix:")
+    print(cm_metrics_df)
+
+    avg_dice_fg_cm = cm_metrics_df.loc[cm_metrics_df["class"] != "background", "dice_from_cm"].mean()
+    avg_iou_fg_cm = cm_metrics_df.loc[cm_metrics_df["class"] != "background", "iou_from_cm"].mean()
+
+    print(f'\nAVG DSC from CM (foreground only): {avg_dice_fg_cm:.6f}')
+    print(f'AVG IoU from CM (foreground only): {avg_iou_fg_cm:.6f}')
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    disp = ConfusionMatrixDisplay(confusion_matrix=total_cm, display_labels=selected_class)
+    disp.plot(ax=ax, cmap='Blues', values_format='d', colorbar=False)
+    plt.title("Confusion Matrix (rows=GT, cols=Pred)")
+    plt.tight_layout()
+    plt.savefig(f"{result_dir}/confusion_matrix.png")
+    plt.close()
