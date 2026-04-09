@@ -71,10 +71,9 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
 
 def train_fn(loader, model, optimizer, device, criterion, scaler):
     model.train()
-
     total_loss = 0.0
 
-    for images, labels in tqdm(loader):
+    for images, labels, clinical_batch in tqdm(loader):
         images = images.to(device)
         labels = labels.to(device)
 
@@ -82,19 +81,7 @@ def train_fn(loader, model, optimizer, device, criterion, scaler):
 
         with torch.amp.autocast(device_type=device):
             seg_out = model(images)
-
-            num_classes = seg_out.shape[1]
-
-            # lbl_onehot = F.one_hot(labels.long(), num_classes=num_classes)
-            # lbl_onehot = lbl_onehot.permute(0, 3, 1, 2).to(dtype=seg_out.dtype, device=seg_out.device)
-            lbl_onehot = torch.zeros(
-                (labels.size(0), num_classes, labels.size(1), labels.size(2)), 
-                device=labels.device,
-                dtype=torch.float32
-            )
-            lbl_onehot.scatter_(1, labels.unsqueeze(1).long(), 1.0)
-
-            loss = criterion(seg_out, lbl_onehot)
+            loss = criterion(seg_out, labels)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -116,13 +103,7 @@ def eval_fn(loader, model, device, criterion):
             
             with torch.amp.autocast(device_type=device):
                 predicted = model(images)
-
-                num_classes = predicted.shape[1]
-
-                lbl_onehot = F.one_hot(labels.long(), num_classes=num_classes)
-                lbl_onehot = lbl_onehot.permute(0, 3, 1, 2).to(dtype=predicted.dtype, device=predicted.device)
-
-                loss = criterion(predicted, lbl_onehot)
+                loss = criterion(predicted, labels)
 
             total_loss += loss.item()
 
