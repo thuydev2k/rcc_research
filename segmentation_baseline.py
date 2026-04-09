@@ -11,7 +11,6 @@ from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss
     
 def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, n_clinical, stop_training=False):
     model = UNet(out_classes=out_classes, n_clinical=n_clinical).to(device)
-   
     # use amp to accelerate training => mixed float16, float32
     scaler = torch.amp.GradScaler(device=device)
 
@@ -52,7 +51,7 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
                         'optimizer': optimizer.state_dict(),
                         'scaler': scaler.state_dict(),
                         'lrscheduler': scheduler.state_dict(),
-                        }, f'saved_model/best_model.pt')
+                        }, f'saved_UNet_FiLM_model/best_model.pt')
             print('Model Saved')
         else:
             save_check += 1
@@ -72,7 +71,6 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
 
 def train_fn(loader, model, optimizer, device, criterion, scaler):
     model.train()
-
     total_loss = 0.0
 
     for images, labels, clinical_batch in tqdm(loader):
@@ -91,24 +89,12 @@ def train_fn(loader, model, optimizer, device, criterion, scaler):
         ], dim=1)
 
         clinical_batch = clinical_tensor.to(device)
-        
+
         optimizer.zero_grad()
 
         with torch.amp.autocast(device_type=device):
             seg_out = model(images, clinical_batch)
-
-            num_classes = seg_out.shape[1]
-
-            # lbl_onehot = F.one_hot(labels.long(), num_classes=num_classes)
-            # lbl_onehot = lbl_onehot.permute(0, 3, 1, 2).to(dtype=seg_out.dtype, device=seg_out.device)
-            lbl_onehot = torch.zeros(
-                (labels.size(0), num_classes, labels.size(1), labels.size(2)), 
-                device=labels.device,
-                dtype=torch.float32
-            )
-            lbl_onehot.scatter_(1, labels.unsqueeze(1).long(), 1.0)
-
-            loss = criterion(seg_out, lbl_onehot)
+            loss = criterion(seg_out, labels)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -143,23 +129,17 @@ def eval_fn(loader, model, device, criterion):
             
             with torch.amp.autocast(device_type=device):
                 predicted = model(images, clinical_batch)
-
-                num_classes = predicted.shape[1]
-
-                lbl_onehot = F.one_hot(labels.long(), num_classes=num_classes)
-                lbl_onehot = lbl_onehot.permute(0, 3, 1, 2).to(dtype=predicted.dtype, device=predicted.device)
-
-                loss = criterion(predicted, lbl_onehot)
+                loss = criterion(predicted, labels)
 
             total_loss += loss.item()
 
     return total_loss / len(loader)
 
 def set_weights(model, optimizer, lr_scheduler, scaler, device):
-    saved_model = torch.load(f'./saved_model/best_model.pt', map_location=device)
-    model.load_state_dict(saved_model['model'])
-    optimizer.load_state_dict(saved_model['optimizer'])
-    lr_scheduler.load_state_dict(saved_model['lrscheduler'])
-    scaler.load_state_dict(saved_model['scaler'])
+    saved_UNet_FiLM_model = torch.load(f'./saved_UNet_FiLM_model/best_model.pt', map_location=device)
+    model.load_state_dict(saved_UNet_FiLM_model['model'])
+    optimizer.load_state_dict(saved_UNet_FiLM_model['optimizer'])
+    lr_scheduler.load_state_dict(saved_UNet_FiLM_model['lrscheduler'])
+    scaler.load_state_dict(saved_UNet_FiLM_model['scaler'])
 
     return model, optimizer, lr_scheduler, scaler
