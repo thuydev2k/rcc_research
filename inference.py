@@ -6,6 +6,7 @@ import pandas as pd
 
 from models.BiomedUNet import BiomedTransUNet
 from models.clinical_encoder import ClinicalEncoder
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 selected_class_rgb = [
     [0, 0, 0],          # background (black)
@@ -53,6 +54,59 @@ def DSC_IoU_EachClass_Softmax(predicted, target, out_classes, smooth=1e-10):
 
     return dice_tensor, iou_tensor, valid_classes
 
+def update_confusion_matrix_sklearn(total_cm, output, labels, out_classes):
+    pred = torch.argmax(output, dim=1)   # [B, H, W]
+
+    y_true = labels.detach().cpu().numpy().reshape(-1)
+    y_pred = pred.detach().cpu().numpy().reshape(-1)
+
+    valid_mask = (y_true >= 0) & (y_true < out_classes)
+    y_true = y_true[valid_mask]
+    y_pred = y_pred[valid_mask]
+
+    cm_batch = confusion_matrix(
+        y_true,
+        y_pred,
+        labels=np.arange(out_classes)
+    )
+
+    total_cm += cm_batch
+    return total_cm
+
+def metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
+    total = cm.sum()
+    row_sum = cm.sum(axis=1)
+    col_sum = cm.sum(axis=0)
+
+    records = []
+
+    for c, class_name in enumerate(class_names):
+        tp = cm[c, c]
+        fp = col_sum[c] - tp
+        fn = row_sum[c] - tp
+        tn = total - tp - fp - fn
+
+        dice = (2 * tp) / (2 * tp + fp + fn + smooth)
+        iou = tp / (tp + fp + fn + smooth)
+        precision = tp / (tp + fp + smooth)
+        recall = tp / (tp + fn + smooth)
+        specificity = tn / (tn + fp + smooth)
+
+        records.append({
+            "class": class_name,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "tn": tn,
+            "dice_from_cm": dice,
+            "iou_from_cm": iou,
+            "precision": precision,
+            "recall": recall,
+            "specificity": specificity,
+        })
+
+    return pd.DataFrame(records)
+
 def inference(valid_loader, valid_set, device, out_classes):
     best_model = BiomedTransUNet(out_classes=out_classes, n_clinical=128).to(device)
     clinical_model = ClinicalEncoder().to(device)
@@ -63,7 +117,7 @@ def inference(valid_loader, valid_set, device, out_classes):
     selected_class = ['background', 'kidney', 'tumor', 'cyst']
     best_model.eval()
 
-    idx_arr = np.random.randint(30, 500, size=20)
+    idx_arr = [10, 20, 50, 70, 80, 100, 120, 150, 170, 200, 250, 300, 350, 400, 450]
 
     with torch.no_grad():
         for i in idx_arr:
@@ -103,6 +157,7 @@ def inference(valid_loader, valid_set, device, out_classes):
             plt.savefig(f'./result/prediction_{i}.png')
 
     predictions = []
+    total_cm = np.zeros((out_classes, out_classes), dtype=np.int64)
 
     with torch.no_grad():
         for images, labels, clinical_data in iter(valid_loader):
@@ -112,6 +167,8 @@ def inference(valid_loader, valid_set, device, out_classes):
 
             clinical_emb = clinical_model(clinical_data)
             output = best_model(images, clinical_emb)
+
+            total_cm = update_confusion_matrix_sklearn(total_cm, output, labels, out_classes)
 
             dice, iou, valid_classes = DSC_IoU_EachClass_Softmax(output, labels, out_classes=out_classes)
 
@@ -130,7 +187,6 @@ def inference(valid_loader, valid_set, device, out_classes):
             predictions.append(prediction)
 
     result_dir = f'./result/'
-
     df_csv = pd.DataFrame(predictions)
     if not os.path.exists(result_dir):
         os.mkdir(result_dir)
@@ -151,3 +207,29 @@ def inference(valid_loader, valid_set, device, out_classes):
         print(f'Class: {class_name}, Mean Dice: {mean_dice:.44f}, Mean IoU: {mean_iou:.4f}')
 
     print(f'AVG DSC: {np.mean(mean_dices[1:])}, AVG IoU: {np.mean(mean_ious[1:])}')
+
+    cm_df = pd.DataFrame(total_cm, index=selected_class, columns=selected_class)
+    cm_df.to_csv(f"{result_dir}/confusion_matrix.csv")
+
+    print("\nConfusion Matrix (rows=GT, cols=Pred):")
+    print(cm_df)
+
+    cm_metrics_df = metrics_from_confusion_matrix(total_cm, selected_class)
+    cm_metrics_df.to_csv(f"{result_dir}/metrics_from_confusion_matrix.csv", index=False)
+
+    print("\nMetrics from Confusion Matrix:")
+    print(cm_metrics_df)
+
+    avg_dice_fg_cm = cm_metrics_df.loc[cm_metrics_df["class"] != "background", "dice_from_cm"].mean()
+    avg_iou_fg_cm = cm_metrics_df.loc[cm_metrics_df["class"] != "background", "iou_from_cm"].mean()
+
+    print(f'\nAVG DSC from CM (foreground only): {avg_dice_fg_cm:.6f}')
+    print(f'AVG IoU from CM (foreground only): {avg_iou_fg_cm:.6f}')
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    disp = ConfusionMatrixDisplay(confusion_matrix=total_cm, display_labels=selected_class)
+    disp.plot(ax=ax, cmap='Blues', values_format='d', colorbar=False)
+    plt.title("Confusion Matrix (rows=GT, cols=Pred)")
+    plt.tight_layout()
+    plt.savefig(f"{result_dir}/confusion_matrix.png")
+    plt.close()

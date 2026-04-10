@@ -79,6 +79,24 @@ for case in tqdm(VALID_CASES):
         seg_valid_label_paths.append(l)
         seg_valid_clinicals.append(clinical_data)
 
+seg_inference_volume_paths = []
+seg_inference_label_paths = []
+seg_inference_clinicals = []
+
+INFERENCE_CASES = sorted(os.listdir(SEG_DATA_DIR + 'test/images'))
+
+for case in tqdm(INFERENCE_CASES):
+    c = case.split('.')[0].split('_')[-1]
+    case_key = f"case_{c}"
+    v = SEG_DATA_DIR+f'test/images/{case_key}.npz'
+    l = SEG_DATA_DIR+f'test/labels/{case_key}.npz'
+    if (case_key in clinical_lookup):
+        clinical_data = clinical_lookup[case_key]
+
+        seg_inference_volume_paths.append(v)
+        seg_inference_label_paths.append(l)
+        seg_inference_clinicals.append(clinical_data)
+
 def multimodal_collate_fn(batch):
     images, labels, clinical_list = zip(*batch)
 
@@ -95,9 +113,11 @@ def multimodal_collate_fn(batch):
 
 train_seg_dataset = SegmentationDataset2D(seg_train_volume_paths, seg_train_label_paths, seg_train_clinicals)
 valid_seg_dataset = SegmentationDataset2D(seg_valid_volume_paths, seg_valid_label_paths, seg_valid_clinicals)
+inference_seg_dataset = SegmentationDataset2D(seg_inference_volume_paths, seg_inference_label_paths)
 
 train_seg_loader = DataLoader(train_seg_dataset, batch_size=4, shuffle=True, collate_fn=multimodal_collate_fn, num_workers=0)
 valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, collate_fn=multimodal_collate_fn, num_workers=0)
+inference_seg_loader = DataLoader(inference_seg_dataset, batch_size=1, shuffle=False, collate_fn=multimodal_collate_fn, num_workers=0)
 
-# segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4, n_clinical=128)
-inference(valid_seg_loader, valid_seg_dataset, device, out_classes=4)
+segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4, n_clinical=128)
+inference(inference_seg_loader, inference_seg_dataset, device, out_classes=4)
