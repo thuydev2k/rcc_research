@@ -65,5 +65,5 @@ train_seg_loader = DataLoader(train_seg_dataset, batch_size=4, shuffle=True, num
 valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
 inference_seg_loader = DataLoader(inference_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
 
-segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4, n_clinical=17)
+segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4)
 inference(inference_seg_loader, inference_seg_dataset, device, out_classes=4)

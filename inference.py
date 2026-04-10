@@ -108,8 +108,8 @@ def metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
     return pd.DataFrame(records)
 
 def inference(valid_loader, valid_set, device, out_classes):
-    best_model = BiomedTransUNet(out_classes=out_classes, n_clinical=17).to(device)
-    best_checkpoint = torch.load(f'./saved_UNet_FiLM_model/best_model.pt')
+    best_model = BiomedTransUNet(out_classes=out_classes).to(device)
+    best_checkpoint = torch.load(f'./saved_BiomedCLIP_UNet_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
 
     selected_class = ['background', 'kidney', 'tumor', 'cyst']
