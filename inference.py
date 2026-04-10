@@ -110,7 +110,7 @@ def metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
 def inference(valid_loader, valid_set, device, out_classes):
     best_model = BiomedTransUNet(out_classes=out_classes, n_clinical=128).to(device)
     clinical_model = ClinicalEncoder().to(device)
-    best_checkpoint = torch.load(f'./saved_model/best_model.pt')
+    best_checkpoint = torch.load(f'./saved_BiomedCLIP_UNet_MLP_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
     clinical_model.load_state_dict(best_checkpoint['clinical_model'])
 

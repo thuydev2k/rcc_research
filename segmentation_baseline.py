@@ -56,7 +56,7 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
                         'optimizer': optimizer.state_dict(),
                         'scaler': scaler.state_dict(),
                         'lrscheduler': scheduler.state_dict(),
-                        }, f'saved_BiomedCLIP_UNet_model/best_model.pt')
+                        }, f'saved_BiomedCLIP_UNet_MLP_model/best_model.pt')
             print('Model Saved')
         else:
             save_check += 1
@@ -128,11 +128,11 @@ def eval_fn(loader, model, clinical_model, device, criterion):
     return total_loss / len(loader)
 
 def set_weights(model, clinical_model, optimizer, lr_scheduler, scaler, device):
-    saved_model = torch.load(f'./saved_model/best_model.pt', map_location=device)
-    model.load_state_dict(saved_model['model'])
-    clinical_model.load_state_dict(saved_model['clinical_model'])
-    optimizer.load_state_dict(saved_model['optimizer'])
-    lr_scheduler.load_state_dict(saved_model['lrscheduler'])
-    scaler.load_state_dict(saved_model['scaler'])
+    saved_BiomedCLIP_UNet_MLP_model = torch.load(f'./saved_BiomedCLIP_UNet_MLP_model/best_model.pt', map_location=device)
+    model.load_state_dict(saved_BiomedCLIP_UNet_MLP_model['model'])
+    clinical_model.load_state_dict(saved_BiomedCLIP_UNet_MLP_model['clinical_model'])
+    optimizer.load_state_dict(saved_BiomedCLIP_UNet_MLP_model['optimizer'])
+    lr_scheduler.load_state_dict(saved_BiomedCLIP_UNet_MLP_model['lrscheduler'])
+    scaler.load_state_dict(saved_BiomedCLIP_UNet_MLP_model['scaler'])
 
     return model, clinical_model, optimizer, lr_scheduler, scaler
