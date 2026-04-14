@@ -113,7 +113,7 @@ def multimodal_collate_fn(batch):
 
 train_seg_dataset = SegmentationDataset2D(seg_train_volume_paths, seg_train_label_paths, seg_train_clinicals)
 valid_seg_dataset = SegmentationDataset2D(seg_valid_volume_paths, seg_valid_label_paths, seg_valid_clinicals)
-inference_seg_dataset = SegmentationDataset2D(seg_inference_volume_paths, seg_inference_label_paths)
+inference_seg_dataset = SegmentationDataset2D(seg_inference_volume_paths, seg_inference_label_paths, seg_inference_clinicals)
 
 train_seg_loader = DataLoader(train_seg_dataset, batch_size=4, shuffle=True, collate_fn=multimodal_collate_fn, num_workers=0)
 valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, collate_fn=multimodal_collate_fn, num_workers=0)
