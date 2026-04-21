@@ -8,7 +8,7 @@ from data.dataloader import SegmentationDataset2D
 from segmentation_baseline import segmentation_baseline
 from inference import inference
 
-device = 'cuda:1'
+device = 'cuda:2'
 
 SEG_DATA_DIR = 'dataset/kits23/labeled/'
 
@@ -65,5 +65,24 @@ train_seg_loader = DataLoader(train_seg_dataset, batch_size=4, shuffle=True, num
 valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
 inference_seg_loader = DataLoader(inference_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
 
-segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4)
-inference(inference_seg_loader, inference_seg_dataset, device, out_classes=4)
+segmentation_baseline(
+    train_loader=train_seg_loader,
+    valid_loader=valid_seg_loader,
+    device=device,
+    epoch=100,
+    lr=1e-4,
+    out_classes=4,
+    medimageinsight_repo_root='MedImageInsights',
+    config_path='MedImageInsights/2024.09.27/config.yaml',
+    checkpoint_path='MedImageInsights/2024.09.27/vision_model/medimageinsigt-v1.0.0.pt',
+)
+
+inference(
+    valid_loader=inference_seg_loader, 
+    valid_set=inference_seg_dataset, 
+    device=device, 
+    out_classes=4,
+    medimageinsight_repo_root='MedImageInsights',
+    config_path='MedImageInsights/2024.09.27/config.yaml',
+    checkpoint_path='MedImageInsights/2024.09.27/vision_model/medimageinsigt-v1.0.0.pt',
+)

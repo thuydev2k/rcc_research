@@ -6,15 +6,49 @@ import torch.nn.functional as F
 
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from models.BiomedUNet import BiomedTransUNet
+from models.MedImageInsightUNet import MedImageInsightUNet
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss
     
-def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, stop_training=False):
-    model = BiomedTransUNet(out_classes=out_classes).to(device)
-    # use amp to accelerate training => mixed float16, float32
+def segmentation_baseline(
+        train_loader, 
+        valid_loader, device, 
+        epoch, 
+        lr, 
+        out_classes, 
+        medimageinsight_repo_root, 
+        config_path,
+        checkpoint_path,
+        stop_training=False
+    ):
+    
+    model = MedImageInsightUNet(medimageinsight_repo_root=medimageinsight_repo_root,
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        out_classes=out_classes,
+        freeze_encoder=True,
+    ).to(device)
+
     scaler = torch.amp.GradScaler(device=device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-6)
+    encoder_params = []
+    decoder_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.startswith("encoder."):
+            encoder_params.append(param)
+        else:
+            decoder_params.append(param)
+
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": encoder_params, "lr": lr * 0.1},
+            {"params": decoder_params, "lr": lr},
+        ],
+        weight_decay=1e-6,
+    )
+    
     # learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=lr * 0.01)
 
@@ -51,7 +85,7 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
                         'optimizer': optimizer.state_dict(),
                         'scaler': scaler.state_dict(),
                         'lrscheduler': scheduler.state_dict(),
-                        }, f'saved_BiomedCLIP_UNet_model/best_model.pt')
+                        }, f'saved_MedImageInsight_UNet_model/best_model.pt')
             print('Model Saved')
         else:
             save_check += 1
@@ -110,10 +144,10 @@ def eval_fn(loader, model, device, criterion):
     return total_loss / len(loader)
 
 def set_weights(model, optimizer, lr_scheduler, scaler, device):
-    saved_BiomedCLIP_UNet_model = torch.load(f'./saved_BiomedCLIP_UNet_model/best_model.pt', map_location=device)
-    model.load_state_dict(saved_BiomedCLIP_UNet_model['model'])
-    optimizer.load_state_dict(saved_BiomedCLIP_UNet_model['optimizer'])
-    lr_scheduler.load_state_dict(saved_BiomedCLIP_UNet_model['lrscheduler'])
-    scaler.load_state_dict(saved_BiomedCLIP_UNet_model['scaler'])
+    saved_MedImageInsight_UNet_model = torch.load(f'./saved_MedImageInsight_UNet_model/best_model.pt', map_location=device)
+    model.load_state_dict(saved_MedImageInsight_UNet_model['model'])
+    optimizer.load_state_dict(saved_MedImageInsight_UNet_model['optimizer'])
+    lr_scheduler.load_state_dict(saved_MedImageInsight_UNet_model['lrscheduler'])
+    scaler.load_state_dict(saved_MedImageInsight_UNet_model['scaler'])
 
     return model, optimizer, lr_scheduler, scaler

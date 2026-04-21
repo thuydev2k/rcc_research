@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import torch
 import pandas as pd
 
-from models.BiomedUNet import BiomedTransUNet
+from models.MedImageInsightUNet import MedImageInsightUNet
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 selected_class_rgb = [
@@ -107,9 +107,15 @@ def metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
 
     return pd.DataFrame(records)
 
-def inference(valid_loader, valid_set, device, out_classes):
-    best_model = BiomedTransUNet(out_classes=out_classes).to(device)
-    best_checkpoint = torch.load(f'./saved_BiomedCLIP_UNet_model/best_model.pt')
+def inference(valid_loader, valid_set, device, out_classes, medimageinsight_repo_root, config_path, checkpoint_path):
+    best_model = MedImageInsightUNet(
+        medimageinsight_repo_root=medimageinsight_repo_root,
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        out_classes=out_classes,
+        freeze_encoder=True,
+    ).to(device)
+    best_checkpoint = torch.load(f'./saved_MedImageInsight_UNet_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
 
     selected_class = ['background', 'kidney', 'tumor', 'cyst']
