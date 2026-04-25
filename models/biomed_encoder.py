@@ -12,16 +12,12 @@ class BiomedCLIPEncoder(nn.Module):
         )
 
         self.visual = model.visual
-
         del model
 
         for param in self.visual.parameters():
             param.requires_grad = False
         
-        self.embed_dim = embed_dim
-        self.patch_size = 16
         self.hidden_dim = 768
-        
         self.proj = nn.Conv2d(self.hidden_dim, embed_dim, kernel_size=1)
 
     def forward(self, x):
@@ -34,7 +30,6 @@ class BiomedCLIPEncoder(nn.Module):
         B, N, C = x.shape
         H = W = int(N ** 0.5)
         x = x.transpose(1, 2).reshape(B, C, H, W)
-
         x = self.proj(x)
 
         return x
