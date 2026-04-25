@@ -58,7 +58,7 @@ def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_cla
                         'optimizer': optimizer.state_dict(),
                         'scaler': scaler.state_dict(),
                         'lrscheduler': scheduler.state_dict(),
-                        }, f'saved_model/best_model.pt')
+                        }, f'saved_BiomedCLIP_UNet_model/best_model.pt')
             print('Model Saved')
         else:
             save_check += 1
@@ -102,19 +102,7 @@ def train_fn(loader, model, optimizer, device, criterion, scaler):
 
         with torch.amp.autocast(device_type=device):
             seg_out = model(images, clinical_batch)
-
-            num_classes = seg_out.shape[1]
-
-            # lbl_onehot = F.one_hot(labels.long(), num_classes=num_classes)
-            # lbl_onehot = lbl_onehot.permute(0, 3, 1, 2).to(dtype=seg_out.dtype, device=seg_out.device)
-            lbl_onehot = torch.zeros(
-                (labels.size(0), num_classes, labels.size(1), labels.size(2)), 
-                device=labels.device,
-                dtype=torch.float32
-            )
-            lbl_onehot.scatter_(1, labels.unsqueeze(1).long(), 1.0)
-
-            loss = criterion(seg_out, lbl_onehot)
+            loss = criterion(seg_out, labels)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -149,20 +137,14 @@ def eval_fn(loader, model, device, criterion):
             
             with torch.amp.autocast(device_type=device):
                 predicted = model(images, clinical_batch)
-
-                num_classes = predicted.shape[1]
-
-                lbl_onehot = F.one_hot(labels.long(), num_classes=num_classes)
-                lbl_onehot = lbl_onehot.permute(0, 3, 1, 2).to(dtype=predicted.dtype, device=predicted.device)
-
-                loss = criterion(predicted, lbl_onehot)
+                loss = criterion(predicted, labels)
 
             total_loss += loss.item()
 
     return total_loss / len(loader)
 
 def set_weights(model, optimizer, lr_scheduler, scaler, device):
-    saved_model = torch.load(f'./saved_model/best_model.pt', map_location=device)
+    saved_model = torch.load(f'./saved_BiomedCLIP_UNet_model/best_model.pt', map_location=device)
     model.load_state_dict(saved_model['model'])
     optimizer.load_state_dict(saved_model['optimizer'])
     lr_scheduler.load_state_dict(saved_model['lrscheduler'])

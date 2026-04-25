@@ -210,7 +210,7 @@ def inference(valid_loader, valid_set, device, out_classes):
         biomed_embed_dim=512
     ).to(device)
 
-    best_checkpoint = torch.load(f'./saved_BiomedCLIP_UNet_model/best_model1.pt')
+    best_checkpoint = torch.load(f'./saved_BiomedCLIP_UNet_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
     best_model.eval()
 
