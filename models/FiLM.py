@@ -7,7 +7,7 @@ class FiLM(nn.Module):
         
         self.controller = nn.Sequential(
             nn.Linear(n_clinical, 128),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(128, n_features * 2)
         )
 

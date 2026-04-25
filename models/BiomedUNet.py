@@ -4,70 +4,15 @@ from models.biomed_encoder import BiomedCLIPEncoder
 from models.FiLM import FiLM
 import torch.nn.functional as F
 
-class PyramidFeatures(nn.Module):
-    def __init__(self, base_dim=128, n_clinical=0):
-        super().__init__()
-
-        self.n_clinical = n_clinical
-
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(base_dim, 128, 3, padding=1),
-            nn.BatchNorm2d(128)
-        )
-
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(128, 256, 3, stride=2, padding=1),
-            nn.BatchNorm2d(256)
-        )
-
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(256, 512, 3, stride=2, padding=1),
-            nn.BatchNorm2d(512)
-        )
-
-        self.conv4 = nn.Sequential(
-            nn.Conv2d(512, 512, 3, stride=2, padding=1),
-            nn.BatchNorm2d(512)
-        )
-
-        self.relu = nn.ReLU(inplace=True)
-
-        if n_clinical > 0:
-            self.film1 = FiLM(128, n_clinical)
-            self.film2 = FiLM(256, n_clinical)
-            self.film3 = FiLM(512, n_clinical)
-            self.film4 = FiLM(512, n_clinical)
-
-    def forward(self, x, clinical_data=None):
-        f1 = self.conv1(x)
-        if self.n_clinical > 0 and clinical_data is not None:
-           f1 = self.film1(f1, clinical_data)
-        f1 = self.relu(f1)
-
-        f2 = self.conv2(f1)
-        if self.n_clinical > 0 and clinical_data is not None:
-           f2 = self.film2(f2, clinical_data)
-        f2 = self.relu(f2)
-
-        f3 = self.conv3(f2)
-        if self.n_clinical > 0 and clinical_data is not None:
-           f3 = self.film3(f3, clinical_data)
-        f3 = self.relu(f3)
-
-        f4 = self.conv4(f3)
-        if self.n_clinical > 0 and clinical_data is not None:
-           f4 = self.film4(f4, clinical_data)
-        f4 = self.relu(f4)
-
-        return f1, f2, f3, f4
-
 class DoubleConv(nn.Module):
     def __init__(self, in_chanels, out_channels):
         super(DoubleConv, self).__init__()
+
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_chanels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
+
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
@@ -75,6 +20,18 @@ class DoubleConv(nn.Module):
 
     def forward(self, x):
         return self.double_conv(x)
+
+class DownBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+
+        self.double_conv = DoubleConv(in_channels, out_channels)
+        self.down_sample = nn.MaxPool2d(2)
+
+    def forward(self, x):
+        skip_out = self.double_conv(x)
+        down_out = self.down_sample(skip_out)
+        return down_out, skip_out
 
 class UpBlock(nn.Module):
     def __init__(self, in_ch, skip_ch, out_ch):
@@ -85,54 +42,76 @@ class UpBlock(nn.Module):
 
     def forward(self, x, skip):
         x = self.up_sample(x)
+
         if x.shape[-2:] != skip.shape[-2:]:
             x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=True)
+
         x = torch.cat([x, skip], dim=1)
-        x = self.conv(x)
-        return x
+        return self.conv(x)
     
 class BiomedTransUNet(nn.Module):
-    def __init__(self, out_classes=4, embed_dim=128, n_clinical=0):
+    def __init__(self, in_classes=1, out_classes=4, embed_dim=128, n_clinical=17, biomed_embed_dim=512):
         super().__init__()
 
-        self.encoder = BiomedCLIPEncoder(embed_dim)
-        self.pyramid = PyramidFeatures(embed_dim, n_clinical)
+        self.down_conv1 = DownBlock(in_classes, 64)    # 224 -> 112
+        self.down_conv2 = DownBlock(64, 128)           # 112 -> 56
+        self.down_conv3 = DownBlock(128, 256)          # 56 -> 28
+        self.down_conv4 = DownBlock(256, 512)          # 28 -> 14
 
-        self.up1 = UpBlock(512, 512, 256)
-        self.up2 = UpBlock(256, 256, 128)
-        self.up3 = UpBlock(128, 128, 64)
+        self.unet_bottleneck = DoubleConv(512, 1024)   # [B, 1024, 14, 14]
 
-        self.final_up = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-            nn.Conv2d(32, 16, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+        self.biomed_encoder = BiomedCLIPEncoder(
+            embed_dim=biomed_embed_dim
         )
 
-        self.out_conv = nn.Conv2d(16, out_classes, kernel_size=1)
+        self.fusion = DoubleConv(
+            1024 + biomed_embed_dim,
+            1024
+        )
+
+        self.film_bottleneck = FiLM(
+            n_features=1024,
+            n_clinical=n_clinical
+        )
+
+        self.up_conv4 = UpBlock(1024, 512, 512)        # 14 -> 28
+        self.up_conv3 = UpBlock(512, 256, 256)         # 28 -> 56
+        self.up_conv2 = UpBlock(256, 128, 128)         # 56 -> 112
+        self.up_conv1 = UpBlock(128, 64, 64)
+
+        self.out_conv = nn.Conv2d(64, out_classes, kernel_size=1)
 
     def forward(self, x, clinical_data=None):
-        x = self.encoder(x)
+        image_input = x
 
-        f1, f2, f3, f4 = self.pyramid(x, clinical_data)
+        x, skip1 = self.down_conv1(x)
+        x, skip2 = self.down_conv2(x)
+        x, skip3 = self.down_conv3(x)
+        x, skip4 = self.down_conv4(x)
 
-        d1 = self.up1(f4, f3)
-        d2 = self.up2(d1, f2)
-        d3 = self.up3(d2, f1)
+        x = self.unet_bottleneck(x)  # [B, 1024, 14, 14]
 
-        d_final = self.final_up(d3)
+        biomed_feat = self.biomed_encoder(image_input)
 
-        out = self.out_conv(d_final)
+        if biomed_feat.shape[-2:] != x.shape[-2:]:
+            biomed_feat = F.interpolate(
+                biomed_feat,
+                size=x.shape[-2:],
+                mode="bilinear",
+                align_corners=True
+            )
+
+        x = torch.cat([x, biomed_feat], dim=1)
+        x = self.fusion(x)  # [B, 1024, 14, 14]
+
+        if clinical_data is not None:
+            x = self.film_bottleneck(x, clinical_data)
+
+        x = self.up_conv4(x, skip4)
+        x = self.up_conv3(x, skip3)
+        x = self.up_conv2(x, skip2)
+        x = self.up_conv1(x, skip1)
+
+        out = self.out_conv(x)
 
         return out

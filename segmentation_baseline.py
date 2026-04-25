@@ -10,7 +10,13 @@ from models.BiomedUNet import BiomedTransUNet
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss
     
 def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, n_clinical, stop_training=False):
-    model = BiomedTransUNet(out_classes=out_classes, n_clinical=n_clinical).to(device)
+    model = BiomedTransUNet(
+        in_classes=1, 
+        out_classes=out_classes, 
+        embed_dim=128, 
+        n_clinical=n_clinical, 
+        biomed_embed_dim=512
+    ).to(device)
    
     # use amp to accelerate training => mixed float16, float32
     scaler = torch.amp.GradScaler(device=device)

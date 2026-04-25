@@ -18,10 +18,7 @@ class BiomedCLIPEncoder(nn.Module):
         for param in self.visual.parameters():
             param.requires_grad = False
         
-        self.embed_dim = embed_dim
-        self.patch_size = 16
         self.hidden_dim = 768
-        
         self.proj = nn.Conv2d(self.hidden_dim, embed_dim, kernel_size=1)
 
     def forward(self, x):
