@@ -1,66 +1,97 @@
 import os
-
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from data.dataloader import SegmentationDataset2D
-from segmentation_baseline import segmentation_baseline
+
+from data.dataloader import SegmentationDataset3D
+from segmentation_baseline import segmentation_baseline_3d
 from inference import inference
 
-device = 'cuda:1'
+device = "cpu"
 
-SEG_DATA_DIR = 'dataset/kits23/labeled/'
+SEG_DATA_DIR = "dataset/kits23/labeled/"
+out_classes = 4
 
-train_case_ids = [f"case_{c.split('_')[-1].split('.')[0]}" for c in os.listdir('dataset/kits23/labeled/train/images')]
+def collect_paths(split):
+    image_dir = os.path.join(SEG_DATA_DIR, split, "images")
+    label_dir = os.path.join(SEG_DATA_DIR, split, "labels")
 
-seg_train_volume_paths = []
-seg_train_label_paths = []
+    volume_paths = []
+    label_paths = []
 
-CASES = sorted(os.listdir(SEG_DATA_DIR + 'train/images'))
+    cases = sorted(os.listdir(image_dir))
 
-for case in tqdm(CASES):
-    c = case.split('.')[0].split('_')[-1]
-    case_key = f"case_{c}"
-    volume_path = SEG_DATA_DIR+f'train/images/{case_key}.npz'
-    label_path = SEG_DATA_DIR+f'train/labels/{case_key}.npz'
-    
-    seg_train_volume_paths.append(volume_path)
-    seg_train_label_paths.append(label_path)
+    for case in tqdm(cases):
+        c = case.split(".")[0].split("_")[-1]
+        case_key = f"case_{c}"
 
-seg_valid_volume_paths = []
-seg_valid_label_paths = []
+        volume_path = os.path.join(image_dir, f"{case_key}.npz")
+        label_path = os.path.join(label_dir, f"{case_key}.npz")
 
-VALID_CASES = sorted(os.listdir(SEG_DATA_DIR + 'valid/images'))
+        volume_paths.append(volume_path)
+        label_paths.append(label_path)
 
-for case in tqdm(VALID_CASES):
-    c = case.split('.')[0].split('_')[-1]
-    case_key = f"case_{c}"
-    v = SEG_DATA_DIR+f'valid/images/{case_key}.npz'
-    l = SEG_DATA_DIR+f'valid/labels/{case_key}.npz'
+    return volume_paths, label_paths
 
-    seg_valid_volume_paths.append(v)
-    seg_valid_label_paths.append(l)
+train_volume_paths, train_label_paths = collect_paths("train")
+valid_volume_paths, valid_label_paths = collect_paths("valid")
+test_volume_paths, test_label_paths = collect_paths("test")
 
-seg_inference_volume_paths = []
-seg_inference_label_paths = []
+train_dataset = SegmentationDataset3D(
+    train_volume_paths,
+    train_label_paths,
+    margin=(8, 32, 32),
+)
 
-INFERENCE_CASES = sorted(os.listdir(SEG_DATA_DIR + 'test/images'))
+valid_dataset = SegmentationDataset3D(
+    valid_volume_paths,
+    valid_label_paths,
+    margin=(8, 32, 32),
+)
 
-for case in tqdm(INFERENCE_CASES):
-    c = case.split('.')[0].split('_')[-1]
-    case_key = f"case_{c}"
-    v = SEG_DATA_DIR+f'test/images/{case_key}.npz'
-    l = SEG_DATA_DIR+f'test/labels/{case_key}.npz'
+test_dataset = SegmentationDataset3D(
+    test_volume_paths,
+    test_label_paths,
+    margin=(8, 32, 32),
+)
 
-    seg_inference_volume_paths.append(v)
-    seg_inference_label_paths.append(l)
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=1,
+    shuffle=True,
+    num_workers=4,
+    pin_memory=True,
+)
 
-train_seg_dataset = SegmentationDataset2D(seg_train_volume_paths, seg_train_label_paths)
-valid_seg_dataset = SegmentationDataset2D(seg_valid_volume_paths, seg_valid_label_paths)
-inference_seg_dataset = SegmentationDataset2D(seg_inference_volume_paths, seg_inference_label_paths)
+valid_loader = DataLoader(
+    valid_dataset,
+    batch_size=1,
+    shuffle=False,
+    num_workers=4,
+    pin_memory=True,
+)
 
-train_seg_loader = DataLoader(train_seg_dataset, batch_size=8, shuffle=True, num_workers=0)
-valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
-inference_seg_loader = DataLoader(inference_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
+test_loader = DataLoader(
+    test_dataset,
+    batch_size=1,
+    shuffle=False,
+    num_workers=4,
+    pin_memory=True,
+)
 
-segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4)
-inference(inference_seg_loader, inference_seg_dataset, device, out_classes=4)
+segmentation_baseline_3d(
+    train_loader=train_loader,
+    valid_loader=valid_loader,
+    device=device,
+    epochs=100,
+    lr=1e-4,
+    out_classes=out_classes,
+)
+
+inference(
+    valid_loader=test_loader,
+    valid_set=test_dataset,
+    device=device,
+    out_classes=out_classes,
+    checkpoint_path="./saved_UNet3D_model/best_model1.pt",
+    result_dir="./result_3d",
+)
