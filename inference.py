@@ -5,7 +5,7 @@ import torch
 import pandas as pd
 
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from models.UNet3D import UNet3D
+from models.MerlinUNet3D import MerlinUNet3D
 
 
 selected_class = ["background", "kidney", "tumor", "cyst"]
@@ -254,16 +254,18 @@ def inference(
     valid_loader,
     valid_set,
     device,
-    out_classes=4,
-    checkpoint_path="./saved_UNet3D_model/best_model1.pt",
+    out_classes,
+    merlin_model,
+    checkpoint_path="./saved_Merlin_UNet_3D_model/best_model1.pt",
     result_dir="./result_3d",
 ):
     os.makedirs(result_dir, exist_ok=True)
 
-    best_model = UNet3D(
-        in_channels=1,
+    best_model = model = MerlinUNet3D(
+        merlin_model=merlin_model,
         out_classes=out_classes,
-        base_channels=16,
+        freeze_encoder=True,
+        decoder_channels=(1024, 512, 256, 128),
     ).to(device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)

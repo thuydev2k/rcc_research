@@ -6,10 +6,14 @@ from data.dataloader import SegmentationDataset3D
 from segmentation_baseline import segmentation_baseline_3d
 from inference import inference
 
-device = "cpu"
+device = "cuda"
 
 SEG_DATA_DIR = "dataset/kits23/labeled/"
 out_classes = 4
+
+from Merlin.merlin import Merlin
+
+merlin_model = Merlin()
 
 def collect_paths(split):
     image_dir = os.path.join(SEG_DATA_DIR, split, "images")
@@ -85,6 +89,7 @@ segmentation_baseline_3d(
     epochs=100,
     lr=1e-4,
     out_classes=out_classes,
+    merlin_model=merlin_model
 )
 
 inference(
@@ -92,6 +97,7 @@ inference(
     valid_set=test_dataset,
     device=device,
     out_classes=out_classes,
-    checkpoint_path="./saved_UNet3D_model/best_model1.pt",
-    result_dir="./result_3d",
+    merlin_model=merlin_model,
+    checkpoint_path="./saved_Merlin_UNet_3D_model/best_model1.pt",
+    result_dir="./result_merlin_unet_3d",
 )

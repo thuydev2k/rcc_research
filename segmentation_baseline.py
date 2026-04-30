@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
-from models.UNet3D import UNet3D
+from models.MerlinUNet3D import MerlinUNet3D
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss3D
 
 
@@ -17,17 +17,19 @@ def segmentation_baseline_3d(
     epochs,
     lr,
     out_classes,
-    save_dir="saved_UNet3D_model",
+    merlin_model,
+    save_dir="saved_Merlin_UNet_3D_model",
 ):
     os.makedirs(save_dir, exist_ok=True)
 
-    model = UNet3D(
-        in_channels=1,
+    model = MerlinUNet3D(
+        merlin_model=merlin_model,
         out_classes=out_classes,
-        base_channels=16,
+        freeze_encoder=True,
+        decoder_channels=(1024, 512, 256, 128),
     ).to(device)
 
-    def count_parameters(model):
+  def count_parameters(model):
         total = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -39,7 +41,7 @@ def segmentation_baseline_3d(
     scaler = torch.amp.GradScaler(device=device)
 
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        filter(lambda p: p.requires_grad, model.parameters()),
         lr=lr,
         weight_decay=1e-6,
     )
