@@ -1,3 +1,4 @@
+import math
 from typing import Sequence, Tuple, Union
 
 import torch
@@ -9,18 +10,19 @@ from monai.networks.blocks.transformerblock import TransformerBlock
 from monai.utils import ensure_tuple_rep
 
 
-class ConvPatchEmbedding3D(nn.Module):
+class ConvPatchEmbedding2D(nn.Module):
     """
-    USCNet-style visual transformation for 3D CT.
+    2D version of the Exp1 ConvPatchEmbedding3D.
 
     Input:
-        x: [B, 1, D, H, W]
+        x: [B, 1, H, W]
 
     Output:
         tokens: [B, N, hidden_size]
 
-    This replaces the image part of USCNet's VTT module:
-        3D CT volume -> non-overlapping 3D patches -> patch tokens + positional embedding
+    For img_size=(512,512), patch_size=16:
+        feat_size = (32, 32)
+        N = 32 * 32 = 1024
     """
 
     def __init__(
@@ -30,7 +32,7 @@ class ConvPatchEmbedding3D(nn.Module):
         patch_size: Union[Sequence[int], int] = 16,
         hidden_size: int = 384,
         dropout_rate: float = 0.0,
-        spatial_dims: int = 3,
+        spatial_dims: int = 2,
     ):
         super().__init__()
 
@@ -48,9 +50,9 @@ class ConvPatchEmbedding3D(nn.Module):
         self.patch_size = patch_size
         self.hidden_size = hidden_size
         self.feat_size = tuple(img_d // p_d for img_d, p_d in zip(img_size, patch_size))
-        self.n_patches = int(self.feat_size[0] * self.feat_size[1] * self.feat_size[2])
+        self.n_patches = int(self.feat_size[0] * self.feat_size[1])
 
-        self.patch_embeddings = nn.Conv3d(
+        self.patch_embeddings = nn.Conv2d(
             in_channels=in_channels,
             out_channels=hidden_size,
             kernel_size=patch_size,
@@ -63,7 +65,7 @@ class ConvPatchEmbedding3D(nn.Module):
         nn.init.trunc_normal_(self.position_embeddings, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.patch_embeddings(x)             # [B, hidden_size, D/16, H/16, W/16]
+        x = self.patch_embeddings(x)             # [B, hidden_size, H/16, W/16]
         x = x.flatten(2).transpose(1, 2)         # [B, N, hidden_size]
         x = x + self.position_embeddings
         x = self.dropout(x)
@@ -73,10 +75,7 @@ class ConvPatchEmbedding3D(nn.Module):
 class ViTEncoderNoEmbed(nn.Module):
     """
     ViT encoder without patch embedding.
-
-    This mirrors the ViTNoEmbed idea in KidneyStoneSC:
-    patch embedding is done before this module, then the token sequence is passed
-    through Transformer blocks.
+    Same idea as Exp1 3D version.
     """
 
     def __init__(
@@ -114,27 +113,23 @@ class ViTEncoderNoEmbed(nn.Module):
         return x, hidden_states_out
 
 
-class ViTUNetSeg3D(nn.Module):
+class ViTUNetSeg2D(nn.Module):
     """
-    Exp 1: image-only ViT-UNetSeg for KiTS23 segmentation.
+    2D image-only ViT-UNetSeg for KiTS23 slice segmentation.
 
-    Based on the USCNet / KidneyStoneSC segmentation path:
-        image -> patch embedding -> ViT encoder -> Z3/Z6/Z9/Z12 -> UNETR-style decoder
+    This is the 2D counterpart of Exp1 ViTUNetSeg3D:
+        2D slice -> Conv2D patch embedding -> ViT encoder -> Z3/Z6/Z9/Z12
+        -> UNETR-style 2D decoder -> 4-class segmentation logits
 
-    Differences from the original KidneyStoneSC KSCNet:
-        - no EHR input
-        - no CT-EHR attention
-        - no SMA/MSAF
-        - no classification head
-        - out_channels=4 for KiTS23:
-            0 background, 1 kidney, 2 tumor, 3 cyst
+    Output classes for KiTS23:
+        0 background, 1 kidney, 2 tumor, 3 cyst
     """
 
     def __init__(
         self,
         in_channels: int = 1,
         out_channels: int = 4,
-        img_size: Union[Sequence[int], int] = (96, 128, 128),
+        img_size: Union[Sequence[int], int] = (512, 512),
         feature_size: int = 16,
         hidden_size: int = 384,
         mlp_dim: int = 1536,
@@ -145,7 +140,7 @@ class ViTUNetSeg3D(nn.Module):
         norm_name: Union[Tuple, str] = "instance",
         conv_block: bool = True,
         res_block: bool = True,
-        spatial_dims: int = 3,
+        spatial_dims: int = 2,
     ):
         super().__init__()
 
@@ -155,7 +150,7 @@ class ViTUNetSeg3D(nn.Module):
         self.feat_size = tuple(img_d // p_d for img_d, p_d in zip(self.img_size, self.patch_size))
         self.hidden_size = hidden_size
 
-        self.img_embed = ConvPatchEmbedding3D(
+        self.img_embed = ConvPatchEmbedding2D(
             in_channels=in_channels,
             img_size=self.img_size,
             patch_size=self.patch_size,
@@ -172,7 +167,6 @@ class ViTUNetSeg3D(nn.Module):
             dropout_rate=dropout_rate,
         )
 
-        # Same UNETR-style skip/decoder blocks used by KidneyStoneSC's UNETR/KSCNet.
         self.encoder1 = UnetrBasicBlock(
             spatial_dims=spatial_dims,
             in_channels=in_channels,
@@ -270,26 +264,27 @@ class ViTUNetSeg3D(nn.Module):
 
     def proj_feat(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Convert token sequence [B, N, hidden_size] to 3D feature map:
-            [B, hidden_size, D/16, H/16, W/16]
+        Convert token sequence [B, N, hidden_size] to 2D feature map:
+            [B, hidden_size, H/16, W/16]
         """
         new_view = (x.size(0), *self.feat_size, self.hidden_size)
-        x = x.view(new_view)
-        new_axes = (0, len(x.shape) - 1) + tuple(d + 1 for d in range(len(self.feat_size)))
-        x = x.permute(new_axes).contiguous()
+        x = x.view(new_view)                    # [B, H/16, W/16, C]
+        x = x.permute(0, 3, 1, 2).contiguous()  # [B, C, H/16, W/16]
         return x
 
     def forward(self, x_in: torch.Tensor) -> torch.Tensor:
         """
-        x_in: [B, 1, D, H, W]
+        Args:
+            x_in: [B, 1, H, W]
+
+        Returns:
+            logits: [B, out_channels, H, W]
         """
-        tokens = self.img_embed(x_in)                 # [B, N, C]
-        z12, hidden_states_out = self.vit(tokens)     # final tokens and intermediate Z features
+        tokens = self.img_embed(x_in)
+        z12, hidden_states_out = self.vit(tokens)
 
         enc1 = self.encoder1(x_in)
 
-        # Match the indexing style in KidneyStoneSC nets.py:
-        # hidden_states_out[3], [6], [9], and final z12.
         z3 = hidden_states_out[3]
         z6 = hidden_states_out[6]
         z9 = hidden_states_out[9]
@@ -309,7 +304,8 @@ class ViTUNetSeg3D(nn.Module):
 
 
 def count_parameters(model: nn.Module):
-    total = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total params: {total:,}")
-    print(f"Trainable params: {trainable:,}")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total params: {total_params:,}")
+    print(f"Trainable params: {trainable_params:,}")
+    return total_params, trainable_params

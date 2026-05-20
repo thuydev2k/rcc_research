@@ -1,22 +1,21 @@
 import torch.nn as nn
 import torch.nn.functional as F
 
-from losses.SoftDiceLoss3D import SoftDiceLoss3D
+from losses.SoftDiceLoss2D import SoftDiceLoss2D
 
-
-class SoftDiceCrossEntropyLoss3D(nn.Module):
+class SoftDiceCrossEntropyLoss2D(nn.Module):
     def __init__(
         self,
         ce_weight=0.5,
         dice_weight=0.5,
-        ignore_bg=False,
+        ignore_bg=True,
     ):
-        super(SoftDiceCrossEntropyLoss3D, self).__init__()
+        super(SoftDiceCrossEntropyLoss2D, self).__init__()
 
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
         self.ignore_bg = ignore_bg
-        self.dice_loss = SoftDiceLoss3D()
+        self.dice_loss = SoftDiceLoss2D()
 
     def forward(self, predicted, target):
         """

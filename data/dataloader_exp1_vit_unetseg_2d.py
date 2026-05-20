@@ -1,162 +1,147 @@
-import os
-from typing import Tuple
-
+import math
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 
-class SegmentationSliceDataset2DViT(Dataset):
+class SegmentationDataset2D(Dataset):
     def __init__(
         self,
         image_paths,
         label_paths,
-        case_ids,
-        img_size: Tuple[int, int] = (512, 512),
-        image_key: str = 'data',
-        label_key: str = 'data',
-        slice_mode: str = 'non_empty',
-        min_foreground_pixels: int = 1,
-        return_metadata: bool = False,
     ):
-        self.image_paths = list(image_paths)
-        self.label_paths = list(label_paths)
-        self.case_ids = list(case_ids) if case_ids is not None else [os.path.splitext(os.path.basename(p))[0] for p in image_paths]
-        self.img_size = tuple(img_size)
-        self.image_key = image_key
-        self.label_key = label_key
-        self.slice_mode = slice_mode
-        self.min_foreground_pixels = min_foreground_pixels
-        self.return_metadata = return_metadata
+        self.image_paths = image_paths
+        self.label_paths = label_paths
+        self.samples = []
 
-        for s in self.img_size:
-            if s % 16 != 0:
-                raise ValueError(f"img_size must be divisible by patch_size=16. Got img_size={self.img_size}")
+        for img_path, lbl_path in zip(image_paths, label_paths):
+            img = np.load(img_path)["data"]     # (D, H, W)
+            lbl = np.load(lbl_path)["data"]     # (D, H, W)
 
-        self.samples = self._build_slice_index()
-        print(f"2D slice dataset mode='{slice_mode}': {len(self.samples)} slices")
+            assert img.shape == lbl.shape, f"Shape mismatch: {img.shape} vs {lbl.shape}"
 
-    def _load_npz_array(self, path, key):
-        data = np.load(path)
+            for d in range(img.shape[0]):
+                has_kidney = np.any(lbl[d] == 1)
+                has_tumor = np.any(lbl[d] == 2)
+                has_cyst = np.any(lbl[d] == 3)
 
-        if key is not None:
-            return data[key]
-
-        return data[data.files[0]]
-
-    def _build_slice_index(self):
-        samples = []
-
-        for vol_idx, label_path in enumerate(self.label_paths):
-            label = self._load_npz_array(label_path, self.label_key)
-            label = np.asarray(label)
-
-            if label.ndim == 4 and label.shape[0] == 1:
-                label = label[0]
-            if label.ndim != 3:
-                raise ValueError(f"Expected label shape [D,H,W], got {label.shape} from {label_path}")
-
-            if self.slice_mode == 'all':
-                slice_indices = list(range(label.shape[0]))
-            else:
-                fg_per_slice = (label > 0).sum(axis=(1, 2))
-                slice_indices = np.where(fg_per_slice >= self.min_foreground_pixels)[0].tolist()
-
-                # Safety fallback: if a case has no foreground slices, keep the middle slice.
-                if len(slice_indices) == 0:
-                    slice_indices = [label.shape[0] // 2]
-
-            for z in slice_indices:
-                samples.append((vol_idx, int(z)))
-
-        return samples
+                self.samples.append({
+                    "image":  img[d],
+                    "label": lbl[d],
+                    "has_kidney": has_kidney,
+                    "has_tumor": has_tumor,
+                    "has_cyst": has_cyst,
+                })
 
     def __len__(self):
         return len(self.samples)
 
-    def _prepare_volume_label(self, image, label):
-        image = np.asarray(image)
-        label = np.asarray(label)
+    def __getitem__(self, index):
+        s = self.samples[index]
 
-        if image.ndim == 4 and image.shape[0] == 1:
-            image = image[0]
-        if label.ndim == 4 and label.shape[0] == 1:
-            label = label[0]
-        image = image.astype(np.float32)
-        label = label.astype(np.int64)
+        image = torch.tensor(s["image"], dtype=torch.float32).unsqueeze(0) / 255.0
+        label = torch.tensor(s["label"], dtype=torch.long)
 
         return image, label
+    
+class TumorCystBatchSampler(Sampler):
+    def __init__(
+        self,
+        dataset,
+        batch_size,
+        tumor_ratio=0.30,
+        cyst_ratio=0.30,
+        num_batches=None,
+        seed=42,
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.tumor_ratio = tumor_ratio
+        self.cyst_ratio = cyst_ratio
+        self.seed = seed
+        self.epoch = 0
 
-    def _foreground_center_2d(self, label_slice):
-        foreground = label_slice > 0
-        h, w = label_slice.shape
+        assert tumor_ratio + cyst_ratio <= 1.0, "tumor_ratio + cyst_ratio must be <= 1.0"
 
-        if foreground.sum() == 0:
-            return np.array([h // 2, w // 2], dtype=np.int64)
+        self.cyst_indices = [
+            i for i, s in enumerate(dataset.samples)
+            if s["has_cyst"]
+        ]
 
-        coords = np.array(np.where(foreground))
-        y_min, x_min = coords.min(axis=1)
-        y_max, x_max = coords.max(axis=1)
-        return np.array([(y_min + y_max) // 2, (x_min + x_max) // 2], dtype=np.int64)
+        self.tumor_indices = [
+            i for i, s in enumerate(dataset.samples)
+            if s["has_tumor"] and not s["has_cyst"]
+        ]
 
-    def _fixed_crop_or_pad_2d(self, image_slice, label_slice, center):
-        h, w = image_slice.shape
-        roi_h, roi_w = self.img_size
+        self.other_indices = [
+            i for i, s in enumerate(dataset.samples)
+            if not s["has_tumor"] and not s["has_cyst"]
+        ]
 
-        starts = center - np.array([roi_h, roi_w]) // 2
-        ends = starts + np.array([roi_h, roi_w])
-        shape = np.array([h, w])
+        if len(self.cyst_indices) == 0:
+            raise ValueError("No cyst slices found in dataset.")
 
-        for axis in range(2):
-            if starts[axis] < 0:
-                ends[axis] -= starts[axis]
-                starts[axis] = 0
+        if len(self.tumor_indices) == 0:
+            raise ValueError("No tumor slices found in dataset.")
 
-            if ends[axis] > shape[axis]:
-                shift = ends[axis] - shape[axis]
-                starts[axis] -= shift
-                ends[axis] = shape[axis]
+        self.num_cyst_per_batch = max(1, int(batch_size * cyst_ratio))
+        self.num_tumor_per_batch = max(1, int(batch_size * tumor_ratio))
+        self.num_other_per_batch = (
+            batch_size - self.num_cyst_per_batch - self.num_tumor_per_batch
+        )
 
-            if starts[axis] < 0:
-                starts[axis] = 0
+        if self.num_other_per_batch < 0:
+            raise ValueError("Invalid batch composition. Reduce tumor_ratio or cyst_ratio.")
 
-        y0, x0 = starts.astype(int).tolist()
-        y1, x1 = ends.astype(int).tolist()
+        if num_batches is None:
+            self.num_batches = math.ceil(len(dataset) / batch_size)
+        else:
+            self.num_batches = num_batches
 
-        image_crop = image_slice[y0:y1, x0:x1]
-        label_crop = label_slice[y0:y1, x0:x1]
+        print("BatchSampler statistics:")
+        print(f"Total slices: {len(dataset)}")
+        print(f"Cyst slices: {len(self.cyst_indices)}")
+        print(f"Tumor slices without cyst: {len(self.tumor_indices)}")
+        print(f"Other slices: {len(self.other_indices)}")
+        print()
+        print("Each batch:")
+        print(f"Cyst slices: {self.num_cyst_per_batch}")
+        print(f"Tumor slices: {self.num_tumor_per_batch}")
+        print(f"Other slices: {self.num_other_per_batch}")
 
-        pad_h = roi_h - image_crop.shape[0]
-        pad_w = roi_w - image_crop.shape[1]
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self.epoch)
+        self.epoch += 1
 
-        if pad_h > 0 or pad_w > 0:
-            pad_width = ((0, max(pad_h, 0)), (0, max(pad_w, 0)))
-            image_crop = np.pad(image_crop, pad_width, mode='constant', constant_values=0)
-            label_crop = np.pad(label_crop, pad_width, mode='constant', constant_values=0)
+        for _ in range(self.num_batches):
+            batch = []
 
-        if image_crop.shape != self.img_size:
-            raise RuntimeError(f"Expected crop shape {self.img_size}, got {image_crop.shape}")
+            cyst_batch = rng.choice(
+                self.cyst_indices,
+                size=self.num_cyst_per_batch,
+                replace=True,
+            )
 
-        return image_crop, label_crop
+            tumor_batch = rng.choice(
+                self.tumor_indices,
+                size=self.num_tumor_per_batch,
+                replace=True,
+            )
 
-    def __getitem__(self, index):
-        vol_idx, slice_idx = self.samples[index]
+            if self.num_other_per_batch > 0:
+                other_batch = rng.choice(
+                    self.other_indices,
+                    size=self.num_other_per_batch,
+                    replace=True,
+                )
+                batch.extend(other_batch.tolist())
 
-        image = self._load_npz_array(self.image_paths[vol_idx], self.image_key)
-        label = self._load_npz_array(self.label_paths[vol_idx], self.label_key)
-        image, label = self._prepare_volume_label(image, label)
+            batch.extend(cyst_batch.tolist())
+            batch.extend(tumor_batch.tolist())
 
-        image_slice = image[slice_idx]
-        label_slice = label[slice_idx]
+            rng.shuffle(batch)
 
-        center = self._foreground_center_2d(label_slice)
-        image_slice, label_slice = self._fixed_crop_or_pad_2d(image_slice, label_slice, center)
+            yield batch
 
-        image_tensor = torch.tensor(image_slice, dtype=torch.float32).unsqueeze(0)
-        label_tensor = torch.tensor(label_slice, dtype=torch.long)
-
-        if self.return_metadata:
-            case_id = self.case_ids[vol_idx]
-            return image_tensor, label_tensor, case_id, torch.tensor(slice_idx, dtype=torch.long)
-
-        return image_tensor, label_tensor
+    def __len__(self):
+        return self.num_batches
