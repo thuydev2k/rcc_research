@@ -7,18 +7,17 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from models.UNet import UNet
-from losses.AsymmetricUnifiedFocalLoss import AsymmetricUnifiedFocalLoss
+from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss2D
 
 def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, stop_training=False):
     model = UNet(out_classes=out_classes).to(device)
-    # use amp to accelerate training => mixed float16, float32
     scaler = torch.amp.GradScaler(device=device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-6)
     # learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=lr * 0.01)
 
-    criterion = AsymmetricUnifiedFocalLoss(weight=0.5, delta=0.7, gamma_ce=2.0, gamma_tversky=0.75).to(device)
+    criterion = SoftDiceCrossEntropyLoss2D(ce_weight=0.5, dice_weight=0.5).to(device)
 
     start_epoch = 0
     best_valid_loss = np.inf

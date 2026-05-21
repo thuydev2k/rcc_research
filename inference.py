@@ -37,6 +37,7 @@ def DSC_IoU_EachClass_Softmax(predicted, target, out_classes, smooth=1e-10):
         tp = (pred_c & target_c).sum().float()
         fp = (pred_c & (~target_c)).sum().float()
         fn = ((~pred_c) & target_c).sum().float()
+        # tn = ((~pred_c) & ~target_c).sum().float()
 
         dice_c = 2 * tp / (2 * tp + fp + fn + smooth)
         iou_c  = tp / (tp + fp + fn + smooth)
@@ -52,6 +53,43 @@ def DSC_IoU_EachClass_Softmax(predicted, target, out_classes, smooth=1e-10):
     iou_tensor  = torch.stack(iou_list)
 
     return dice_tensor, iou_tensor, valid_classes
+
+def DSC_IoU_HEC_Softmax(predicted, target, smooth=1e-10):
+
+    pred = torch.argmax(predicted, dim=1)  # [B, H, W]
+
+    hec_defs = {
+        "kidney_and_masses": [1, 2, 3],
+        "kidney_mass": [2, 3],
+        "tumor": [2],
+    }
+
+    result = {}
+
+    for region_name, class_ids in hec_defs.items():
+        pred_region = torch.zeros_like(pred, dtype=torch.bool)
+        target_region = torch.zeros_like(target, dtype=torch.bool)
+
+        for c in class_ids:
+            pred_region |= (pred == c)
+            target_region |= (target == c)
+
+        if target_region.sum() == 0:
+            result[f"{region_name}_dice"] = np.nan
+            result[f"{region_name}_iou"] = np.nan
+            continue
+
+        tp = (pred_region & target_region).sum().float()
+        fp = (pred_region & (~target_region)).sum().float()
+        fn = ((~pred_region) & target_region).sum().float()
+
+        dice = 2 * tp / (2 * tp + fp + fn + smooth)
+        iou = tp / (tp + fp + fn + smooth)
+
+        result[f"{region_name}_dice"] = dice.item()
+        result[f"{region_name}_iou"] = iou.item()
+
+    return result
 
 def update_confusion_matrix_sklearn(total_cm, output, labels, out_classes):
     pred = torch.argmax(output, dim=1)   # [B, H, W]
@@ -106,13 +144,56 @@ def metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
 
     return pd.DataFrame(records)
 
+def compute_hec_dataset_metrics(all_preds, all_targets, smooth=1e-10):
+
+    hec_defs = {
+        "kidney_and_masses": [1, 2, 3],
+        "kidney_mass": [2, 3],
+        "tumor": [2],
+    }
+
+    records = []
+
+    pred_all = torch.cat(all_preds, dim=0)      # [N, H, W]
+    target_all = torch.cat(all_targets, dim=0)  # [N, H, W]
+
+    for region_name, class_ids in hec_defs.items():
+        pred_region = torch.zeros_like(pred_all, dtype=torch.bool)
+        target_region = torch.zeros_like(target_all, dtype=torch.bool)
+
+        for c in class_ids:
+            pred_region |= (pred_all == c)
+            target_region |= (target_all == c)
+
+        tp = (pred_region & target_region).sum().item()
+        fp = (pred_region & (~target_region)).sum().item()
+        fn = ((~pred_region) & target_region).sum().item()
+
+        dice = (2 * tp) / (2 * tp + fp + fn + smooth)
+        iou = tp / (tp + fp + fn + smooth)
+        precision = tp / (tp + fp + smooth)
+        recall = tp / (tp + fn + smooth)
+
+        records.append({
+            "region": region_name,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "dice": dice,
+            "iou": iou,
+            "precision": precision,
+            "recall": recall,
+        })
+
+    return pd.DataFrame(records)
+
 def inference(valid_loader, valid_set, device, out_classes):
     best_model = UNet(out_classes=out_classes).to(device)
     best_checkpoint = torch.load(f'./saved_UNet_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
+    best_model.eval()
 
     selected_class = ['background', 'kidney', 'tumor', 'cyst']
-    best_model.eval()
 
     idx_arr = [10, 20, 50, 70, 80, 100, 120, 150, 170, 200, 250, 300, 350, 400, 450]
 
@@ -148,7 +229,10 @@ def inference(valid_loader, valid_set, device, out_classes):
                 os.mkdir(f'./result')
             plt.savefig(f'./result/prediction_{i}.png')
 
+    # HEC evaluation
     predictions = []
+    all_preds = []
+    all_targets = []
     total_cm = np.zeros((out_classes, out_classes), dtype=np.int64)
 
     with torch.no_grad():
@@ -157,6 +241,18 @@ def inference(valid_loader, valid_set, device, out_classes):
             labels = labels.to(device)
 
             output = best_model(images)
+            pred = torch.argmax(output, dim=1)
+
+            all_preds.append(pred.cpu())
+            all_targets.append(labels.cpu())
+
+            batch_size = images.shape[0]
+            for b in range(batch_size):
+                case_output = output[b:b+1]
+                case_label = labels[b:b+1]
+
+                prediction = DSC_IoU_HEC_Softmax(case_output, case_label)
+                predictions.append(prediction)
 
             total_cm = update_confusion_matrix_sklearn(total_cm, output, labels, out_classes)
 
@@ -177,26 +273,35 @@ def inference(valid_loader, valid_set, device, out_classes):
             predictions.append(prediction)
 
     result_dir = f'./result/'
-    df_csv = pd.DataFrame(predictions)
     if not os.path.exists(result_dir):
         os.mkdir(result_dir)
-    df_csv.to_csv(f"{result_dir}/prediction.csv")
 
-    mean_dices = []
-    mean_ious = []
+    df_csv = pd.DataFrame(predictions)
+    df_csv.to_csv(f"{result_dir}/prediction.csv")
 
     print(df_csv.head())
     print(df_csv.describe())
 
-    for c in range(out_classes):
-        class_name = selected_class[c]
-        mean_dice = df_csv[f'{class_name.lower()}_dice'].mean()
-        mean_iou = df_csv[f'{class_name.lower()}_iou'].mean()
-        mean_dices.append(mean_dice)
-        mean_ious.append(mean_iou)
-        print(f'Class: {class_name}, Mean Dice: {mean_dice:.44f}, Mean IoU: {mean_iou:.4f}')
+    mean_kam_dice = df_csv["kidney_and_masses_dice"].mean()
+    mean_km_dice = df_csv["kidney_mass_dice"].mean()
+    mean_tumor_dice = df_csv["tumor_dice"].mean()
 
-    print(f'AVG DSC: {np.mean(mean_dices[1:])}, AVG IoU: {np.mean(mean_ious[1:])}')
+    mean_kam_iou = df_csv["kidney_and_masses_iou"].mean()
+    mean_km_iou = df_csv["kidney_mass_iou"].mean()
+    mean_tumor_iou = df_csv["tumor_iou"].mean()
+
+    print(f"Kidney and Masses - Mean Dice: {mean_kam_dice:.6f}, Mean IoU: {mean_kam_iou:.6f}")
+    print(f"Kidney Mass       - Mean Dice: {mean_km_dice:.6f}, Mean IoU: {mean_km_iou:.6f}")
+    print(f"Tumor             - Mean Dice: {mean_tumor_dice:.6f}, Mean IoU: {mean_tumor_iou:.6f}")
+
+    print(f"AVG HEC Dice: {np.mean([mean_kam_dice, mean_km_dice, mean_tumor_dice]):.6f}")
+    print(f"AVG HEC IoU : {np.mean([mean_kam_iou, mean_km_iou, mean_tumor_iou]):.6f}")
+
+    hec_metrics_df = compute_hec_dataset_metrics(all_preds, all_targets)
+    hec_metrics_df.to_csv(f"{result_dir}/metrics_hec_dataset_level.csv", index=False)
+
+    print("\nDataset-level HEC Metrics:")
+    print(hec_metrics_df)
 
     cm_df = pd.DataFrame(total_cm, index=selected_class, columns=selected_class)
     cm_df.to_csv(f"{result_dir}/confusion_matrix.csv")

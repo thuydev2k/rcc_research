@@ -6,7 +6,7 @@ from data.dataloader import SegmentationDataset2D
 from segmentation_baseline import segmentation_baseline
 from inference import inference
 
-device = 'cuda:1'
+device = 'cuda:2'
 
 SEG_DATA_DIR = 'dataset/kits23/labeled/'
 
