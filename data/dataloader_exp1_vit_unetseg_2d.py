@@ -70,7 +70,7 @@ class TumorCystBatchSampler(Sampler):
 
         self.tumor_indices = [
             i for i, s in enumerate(dataset.samples)
-            if s["has_tumor"] and not s["has_cyst"]
+            if s["has_tumor"]
         ]
 
         self.other_indices = [

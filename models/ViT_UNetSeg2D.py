@@ -11,19 +11,6 @@ from monai.utils import ensure_tuple_rep
 
 
 class ConvPatchEmbedding2D(nn.Module):
-    """
-    2D version of the Exp1 ConvPatchEmbedding3D.
-
-    Input:
-        x: [B, 1, H, W]
-
-    Output:
-        tokens: [B, N, hidden_size]
-
-    For img_size=(512,512), patch_size=16:
-        feat_size = (32, 32)
-        N = 32 * 32 = 1024
-    """
 
     def __init__(
         self,
@@ -65,8 +52,9 @@ class ConvPatchEmbedding2D(nn.Module):
         nn.init.trunc_normal_(self.position_embeddings, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.patch_embeddings(x)             # [B, hidden_size, H/16, W/16]
-        x = x.flatten(2).transpose(1, 2)         # [B, N, hidden_size]
+        x = self.patch_embeddings(x)       
+        # keep dimension 0 = B/ keep dimension 1 = 384/ flatten dimensions 2 and 3
+        x = x.flatten(2).transpose(1, 2)         #  [B, 384, 32, 32] → [B, 384, 1024] -> [B, 1024, 384]
         x = x + self.position_embeddings
         x = self.dropout(x)
         return x
