@@ -58,7 +58,7 @@ train_seg_dataset = SegmentationDataset2D(seg_train_volume_paths, seg_train_labe
 valid_seg_dataset = SegmentationDataset2D(seg_valid_volume_paths, seg_valid_label_paths)
 inference_seg_dataset = SegmentationDataset2D(seg_inference_volume_paths, seg_inference_label_paths)
 
-train_seg_loader = DataLoader(train_seg_dataset, batch_size=8, shuffle=True, num_workers=0)
+train_seg_loader = DataLoader(train_seg_dataset, batch_size=8, shuffle=True, num_workers=4)
 valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
 inference_seg_loader = DataLoader(inference_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
 

@@ -5,7 +5,7 @@ import torch
 import pandas as pd
 
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from models.UNet import UNet
+from models.TransUNet_Lite import TransUNet_Lite
 
 selected_class_rgb = [
     [0, 0, 0],          # background (black)
@@ -188,8 +188,8 @@ def compute_hec_dataset_metrics(all_preds, all_targets, smooth=1e-10):
     return pd.DataFrame(records)
 
 def inference(valid_loader, valid_set, device, out_classes):
-    best_model = UNet(out_classes=out_classes).to(device)
-    best_checkpoint = torch.load(f'./saved_UNet_model/best_model.pt')
+    best_model = TransUNet_Lite(out_classes=out_classes).to(device)
+    best_checkpoint = torch.load(f'./saved_TransUNet_Lite_model/best_model.pt')
     best_model.load_state_dict(best_checkpoint['model'])
     best_model.eval()
 
@@ -225,9 +225,9 @@ def inference(valid_loader, valid_set, device, out_classes):
             plt.title("prediction")
             plt.imshow(colour_code_segmentation(np.argmax(pred_mask, axis=2)))
 
-            if not os.path.exists(f'./result'):
-                os.mkdir(f'./result')
-            plt.savefig(f'./result/prediction_{i}.png')
+            if not os.path.exists(f'./result_TransUNet_Lite'):
+                os.mkdir(f'./result_TransUNet_Lite')
+            plt.savefig(f'./result_TransUNet_Lite/prediction_{i}.png')
 
     # HEC evaluation
     predictions = []
@@ -272,7 +272,7 @@ def inference(valid_loader, valid_set, device, out_classes):
 
             predictions.append(prediction)
 
-    result_dir = f'./result/'
+    result_dir = f'./result_TransUNet_Lite/'
     if not os.path.exists(result_dir):
         os.mkdir(result_dir)
 
