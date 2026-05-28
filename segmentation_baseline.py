@@ -116,7 +116,7 @@ def segmentation_baseline(
     save_check = 0
 
     for i in range(start_epoch, epoch):
-        if save_check > 20:
+        if save_check > 25:
             print(f"Early stopping at epoch {i}")
             break
 
@@ -155,7 +155,7 @@ def segmentation_baseline(
                     "best_mean_hec_dice": best_mean_hec_dice,
                     "epoch": i,
                 },
-                "saved_TransUNet_Lite_model/best_model.pt",
+                "saved_TransUNet_Lite_model/best_model2.pt",
             )
 
             print("Model Saved")
@@ -330,7 +330,7 @@ def eval_fn(loader, model, device, criterion):
 
 def set_weights(model, optimizer, lr_scheduler, scaler, device):
     checkpoint = torch.load(
-        "./saved_TransUNet_Lite_model/best_model.pt",
+        "./saved_TransUNet_Lite_model/best_model2.pt",
         map_location=device,
     )
 

@@ -39,8 +39,8 @@ class SegmentationDataset2D(Dataset):
     def __getitem__(self, index):
         s = self.samples[index]
 
-        image = torch.tensor(s["image"], dtype=torch.float16).unsqueeze(0) / 255.0
-        label = torch.tensor(s["label"], dtype=torch.long)
+        image = torch.from_numpy(s["image"]).float().unsqueeze(0) / 255.0
+        label = torch.from_numpy(s["label"]).long()
 
         return image, label
     
@@ -68,7 +68,7 @@ class TumorCystBatchSampler(Sampler):
 
         self.tumor_indices = [
             i for i, s in enumerate(dataset.samples)
-            if s["has_tumor"]
+            if s["has_tumor"] and not s["has_cyst"]
         ]
 
         self.other_indices = [

@@ -189,7 +189,7 @@ def compute_hec_dataset_metrics(all_preds, all_targets, smooth=1e-10):
 
 def inference(valid_loader, valid_set, device, out_classes):
     best_model = TransUNet_Lite(out_classes=out_classes).to(device)
-    best_checkpoint = torch.load(f'./saved_TransUNet_Lite_model/best_model.pt')
+    best_checkpoint = torch.load(f'./saved_TransUNet_Lite_model/best_model2.pt', map_location=device, weights_only=False)
     best_model.load_state_dict(best_checkpoint['model'])
     best_model.eval()
 

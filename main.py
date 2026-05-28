@@ -2,7 +2,7 @@ import os
 
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from data.dataloader import SegmentationDataset2D
+from data.dataloader import SegmentationDataset2D, TumorCystBatchSampler
 from segmentation_baseline import segmentation_baseline
 from inference import inference
 
@@ -58,9 +58,17 @@ train_seg_dataset = SegmentationDataset2D(seg_train_volume_paths, seg_train_labe
 valid_seg_dataset = SegmentationDataset2D(seg_valid_volume_paths, seg_valid_label_paths)
 inference_seg_dataset = SegmentationDataset2D(seg_inference_volume_paths, seg_inference_label_paths)
 
-train_seg_loader = DataLoader(train_seg_dataset, batch_size=8, shuffle=True, num_workers=4)
-valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
-inference_seg_loader = DataLoader(inference_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
+train_batch_sampler = TumorCystBatchSampler(
+    dataset=train_seg_dataset,
+    batch_size=8,
+    tumor_ratio=0.25,
+    cyst_ratio=0.25,
+    num_batches=1000,
+)
+
+train_seg_loader = DataLoader(train_seg_dataset, batch_sampler=train_batch_sampler, num_workers=2, pin_memory=True)
+valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=4, shuffle=False, num_workers=0, pin_memory=True)
+inference_seg_loader = DataLoader(inference_seg_dataset, batch_size=4, shuffle=False, num_workers=0, pin_memory=True)
 
 segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4)
 inference(inference_seg_loader, inference_seg_dataset, device, out_classes=4)
