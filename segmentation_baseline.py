@@ -6,14 +6,13 @@ import torch.nn.functional as F
 
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from models.BiomedUNet import BiomedTransUNet
+from models.BiomedUNet import BiomedCLIPUNetFiLM
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss
     
 def segmentation_baseline(train_loader, valid_loader, device, epoch, lr, out_classes, n_clinical, stop_training=False):
-    model = BiomedTransUNet(
+    model = BiomedCLIPUNetFiLM(
         in_classes=1, 
         out_classes=out_classes, 
-        embed_dim=128, 
         n_clinical=n_clinical, 
         biomed_embed_dim=512
     ).to(device)

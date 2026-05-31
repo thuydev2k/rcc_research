@@ -49,47 +49,37 @@ class UpBlock(nn.Module):
         x = torch.cat([x, skip], dim=1)
         return self.conv(x)
     
-class BiomedTransUNet(nn.Module):
-    def __init__(self, in_classes=1, out_classes=4, embed_dim=128, n_clinical=17, biomed_embed_dim=512):
+class BiomedCLIPUNetFiLM(nn.Module):
+    def __init__(self, in_classes=1, out_classes=4, n_clinical=17, biomed_embed_dim=512):
         super().__init__()
 
-        self.down_conv1 = DownBlock(in_classes, 64)    # 224 -> 112
-        self.down_conv2 = DownBlock(64, 128)           # 112 -> 56
-        self.down_conv3 = DownBlock(128, 256)          # 56 -> 28
-        self.down_conv4 = DownBlock(256, 512)          # 28 -> 14
+        self.inc = DoubleConv(in_classes, 64)
+        self.down_conv1 = DownBlock(64, 128)    # 224 -> 112
+        self.down_conv2 = DownBlock(128, 256)           # 112 -> 56
+        self.down_conv3 = DownBlock(256, 512)          # 56 -> 28
+        self.down_conv4 = DownBlock(512, 1024)          # 28 -> 14
 
-        self.unet_bottleneck = DoubleConv(512, 1024)   # [B, 1024, 14, 14]
+        self.biomed_encoder = BiomedCLIPEncoder(embed_dim=biomed_embed_dim)
 
-        self.biomed_encoder = BiomedCLIPEncoder(
-            embed_dim=biomed_embed_dim
-        )
+        self.fusion = DoubleConv(1024 + biomed_embed_dim, 512)
 
-        self.fusion = DoubleConv(
-            1024 + biomed_embed_dim,
-            1024
-        )
+        self.film_bottleneck = FiLM(n_features=512, n_clinical=n_clinical)
 
-        self.film_bottleneck = FiLM(
-            n_features=1024,
-            n_clinical=n_clinical
-        )
-
-        self.up_conv4 = UpBlock(1024, 512, 512)        # 14 -> 28
-        self.up_conv3 = UpBlock(512, 256, 256)         # 28 -> 56
-        self.up_conv2 = UpBlock(256, 128, 128)         # 56 -> 112
-        self.up_conv1 = UpBlock(128, 64, 64)
+        self.up_conv4 = UpBlock(512, 1024, 256)        # 14 -> 28
+        self.up_conv3 = UpBlock(256, 512, 128)         # 28 -> 56
+        self.up_conv2 = UpBlock(128, 256, 64)         # 56 -> 112
+        self.up_conv1 = UpBlock(64, 128, 64)
 
         self.out_conv = nn.Conv2d(64, out_classes, kernel_size=1)
 
     def forward(self, x, clinical_data=None):
         image_input = x
 
+        x = self.inc(x)
         x, skip1 = self.down_conv1(x)
         x, skip2 = self.down_conv2(x)
         x, skip3 = self.down_conv3(x)
         x, skip4 = self.down_conv4(x)
-
-        x = self.unet_bottleneck(x)  # [B, 1024, 14, 14]
 
         biomed_feat = self.biomed_encoder(image_input)
 
@@ -102,7 +92,7 @@ class BiomedTransUNet(nn.Module):
             )
 
         x = torch.cat([x, biomed_feat], dim=1)
-        x = self.fusion(x)  # [B, 1024, 14, 14]
+        x = self.fusion(x)  # [B, 512, 14, 14]
 
         if clinical_data is not None:
             x = self.film_bottleneck(x, clinical_data)

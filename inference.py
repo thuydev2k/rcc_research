@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import torch
 import pandas as pd
 
-from models.BiomedUNet import BiomedTransUNet
+from models.BiomedUNet import BiomedCLIPUNetFiLM
 
 selected_class_rgb = [
     [0, 0, 0],          # background (black)
@@ -202,10 +202,9 @@ def compute_hec_dataset_metrics(all_preds, all_targets, smooth=1e-10):
     return pd.DataFrame(records)
 
 def inference(valid_loader, valid_set, device, out_classes):
-    best_model = BiomedTransUNet(
+    best_model = BiomedCLIPUNetFiLM(
         in_classes=1,
         out_classes=out_classes,
-        embed_dim=128,
         n_clinical=17,
         biomed_embed_dim=512
     ).to(device)
