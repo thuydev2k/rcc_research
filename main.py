@@ -1,68 +1,60 @@
 import os
-import numpy as np
 
-import torch
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from data.dataloader import SegmentationDataset2D
+from data.dataloader import KiTS23SliceDataset2D, TumorCystBatchSampler
 from segmentation_baseline import segmentation_baseline
 from inference import inference
 
-device = 'cuda:1'
+device = 'cuda:2'
 
-SEG_DATA_DIR = 'dataset/kits23/labeled/'
+train_dataset = KiTS23SliceDataset2D(
+    image_dir="kits23_preprocessed_2d_all_slices/train/images",
+    label_dir="kits23_preprocessed_2d_all_slices/train/labels",
+)
 
-train_case_ids = [f"case_{c.split('_')[-1].split('.')[0]}" for c in os.listdir('dataset/kits23/labeled/train/images')]
+valid_dataset = KiTS23SliceDataset2D(
+    image_dir="kits23_preprocessed_2d_all_slices/valid/images",
+    label_dir="kits23_preprocessed_2d_all_slices/valid/labels",
+)
 
-seg_train_volume_paths = []
-seg_train_label_paths = []
+test_dataset = KiTS23SliceDataset2D(
+    image_dir="kits23_preprocessed_2d_all_slices/test/images",
+    label_dir="kits23_preprocessed_2d_all_slices/test/labels",
+)
 
-CASES = sorted(os.listdir(SEG_DATA_DIR + 'train/images'))
+train_batch_sampler = TumorCystBatchSampler(
+    dataset=train_dataset,
+    batch_size=8,
+    tumor_ratio=0.375,
+    cyst_ratio=0.25,
+    num_batches=None,
+    seed=42,
+)
 
-for case in tqdm(CASES):
-    c = case.split('.')[0].split('_')[-1]
-    case_key = f"case_{c}"
-    volume_path = SEG_DATA_DIR+f'train/images/{case_key}.npz'
-    label_path = SEG_DATA_DIR+f'train/labels/{case_key}.npz'
-    
-    seg_train_volume_paths.append(volume_path)
-    seg_train_label_paths.append(label_path)
+train_loader = DataLoader(
+    train_dataset,
+    batch_sampler=train_batch_sampler,
+    num_workers=2,
+    pin_memory=True,
+)
 
-seg_valid_volume_paths = []
-seg_valid_label_paths = []
 
-VALID_CASES = sorted(os.listdir(SEG_DATA_DIR + 'valid/images'))
+valid_loader = DataLoader(
+    valid_dataset,
+    batch_size=8,
+    shuffle=False,
+    num_workers=2,
+    pin_memory=True,
+)
 
-for case in tqdm(VALID_CASES):
-    c = case.split('.')[0].split('_')[-1]
-    case_key = f"case_{c}"
-    v = SEG_DATA_DIR+f'valid/images/{case_key}.npz'
-    l = SEG_DATA_DIR+f'valid/labels/{case_key}.npz'
+test_loader = DataLoader(
+    test_dataset,
+    batch_size=4,
+    shuffle=False,
+    num_workers=0,
+    pin_memory=True,
+)
 
-    seg_valid_volume_paths.append(v)
-    seg_valid_label_paths.append(l)
-
-seg_inference_volume_paths = []
-seg_inference_label_paths = []
-
-INFERENCE_CASES = sorted(os.listdir(SEG_DATA_DIR + 'test/images'))
-
-for case in tqdm(INFERENCE_CASES):
-    c = case.split('.')[0].split('_')[-1]
-    case_key = f"case_{c}"
-    v = SEG_DATA_DIR+f'test/images/{case_key}.npz'
-    l = SEG_DATA_DIR+f'test/labels/{case_key}.npz'
-
-    seg_inference_volume_paths.append(v)
-    seg_inference_label_paths.append(l)
-
-train_seg_dataset = SegmentationDataset2D(seg_train_volume_paths, seg_train_label_paths)
-valid_seg_dataset = SegmentationDataset2D(seg_valid_volume_paths, seg_valid_label_paths)
-inference_seg_dataset = SegmentationDataset2D(seg_inference_volume_paths, seg_inference_label_paths)
-
-train_seg_loader = DataLoader(train_seg_dataset, batch_size=4, shuffle=True, num_workers=0)
-valid_seg_loader = DataLoader(valid_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
-inference_seg_loader = DataLoader(inference_seg_dataset, batch_size=1, shuffle=False, num_workers=0)
-
-segmentation_baseline(train_seg_loader, valid_seg_loader, device, 100, 1e-4, out_classes=4)
-inference(inference_seg_loader, inference_seg_dataset, device, out_classes=4)
+segmentation_baseline(train_loader, valid_loader, device, 100, 1e-4, out_classes=4)
+inference(test_loader, test_dataset, device, out_classes=4)
