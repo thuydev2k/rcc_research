@@ -1,123 +1,164 @@
 import json
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-import numpy as np
 
-class KiTS23ClinicalDataset(Dataset):
-    def __init__(self, json_path, stats=None):
 
+SAFE_NUMERICAL_KEYS = [
+    "age_at_nephrectomy",
+    "bmi",
+    "last_preop_egfr.value",
+]
+
+# Optional. This is pre-operative/radiology-derived, but it can be considered
+# image-derived information. Use it only in a separate ablation experiment.
+OPTIONAL_RADIOLOGY_KEYS = [
+    "radiographic_size",
+]
+
+COMORBIDITY_KEYS = [
+    "chronic_kidney_disease",
+]
+
+CATEGORICAL_MAPS = {
+    "gender": {
+        "__missing__": 0,
+        "male": 1,
+        "female": 2,
+        "transgender_male_to_female": 3,
+    },
+}
+
+
+def get_nested(case: Dict, key: str):
+    """Read nested keys like 'last_preop_egfr.value'."""
+    value = case
+    for part in key.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+        if value is None:
+            return None
+    return value
+
+
+def get_training_stats(
+    json_path: str,
+    train_case_ids: Iterable[str],
+    include_radiographic_size: bool = True,
+) -> Dict[str, Tuple[float, float]]:
+    """
+    Compute mean/std only from training cases to avoid validation/test leakage.
+    """
+    with open(json_path, "r") as f:
+        raw_data = json.load(f)
+
+    data = {item["case_id"]: item for item in raw_data}
+    numerical_keys = list(SAFE_NUMERICAL_KEYS)
+    if include_radiographic_size:
+        numerical_keys += OPTIONAL_RADIOLOGY_KEYS
+
+    stats = {}
+    for key in numerical_keys:
+        values = []
+        for case_id in train_case_ids:
+            case = data.get(case_id)
+            if case is None:
+                continue
+            value = get_nested(case, key)
+            if value is not None:
+                values.append(float(value))
+
+        if len(values) == 0:
+            stats[key] = (0.0, 1.0)
+            continue
+
+        values = np.asarray(values, dtype=np.float32)
+        mean = float(values.mean())
+        std = float(values.std())
+        if std < 1e-6:
+            std = 1.0
+        stats[key] = (mean, std)
+
+    return stats
+
+
+class KiTS23PreopClinicalDataset(Dataset):
+    """
+    Clinical dataset using only pre-operative/patient-history variables.
+
+    Returned dict:
+        numerical:          FloatTensor [N]
+        numerical_missing:  FloatTensor [N], 1 = missing, 0 = present
+        comorbidities:      FloatTensor [1]
+        gender:             LongTensor scalar
+        smoking_history:    LongTensor scalar
+        chewing_tobacco_use:LongTensor scalar
+        alcohol_use:        LongTensor scalar
+    """
+    def __init__(
+        self,
+        json_path: str,
+        stats: Optional[Dict[str, Tuple[float, float]]] = None,
+        include_radiographic_size: bool = True,
+    ):
         with open(json_path, "r") as f:
             raw_data = json.load(f)
 
-        self.data = {item['case_id']: item for item in raw_data}
+        self.data = {item["case_id"]: item for item in raw_data}
         self.cases = list(self.data.keys())
+        self.stats = stats or {}
+        self.include_radiographic_size = include_radiographic_size
 
-        self.stats = stats
-
-        # category mappings
-        self.gender_map = {"male": 0, "female": 1, "transgender_male_to_female": 2}
-        self.smoking_history_map = {
-            "never_smoked": 0,
-            "not_found_in_emr": 1,
-            "previous_smoker": 2,
-            "current_smoker": 3
-        }
-        self.surgery_type_map = {
-            "robotic": 0,
-            "open": 1,
-            "laparoscopic": 2,
-            "percutaneous": 3
-        }
-        self.surgical_approach_map = {
-            "transperitoneal": 0,
-            "retroperitoneal": 1,
-            "trans_to_retro": 2,
-            None: 3
-        }
-        self.tumor_histologic_subtype_map = {
-            "clear_cell_rcc": 0,
-            "papillary_rcc": 1,
-            "chromophobe_rcc": 2,
-            "oncocytoma": 3,
-            "multilocular_cystic_rcc": 4,
-            "clear_cell_papillary": 5,
-            "rcc_unclassified": 6,
-            "transitional_cell_carcinoma": 7,
-            "spindle_cell_neoplasm": 8,
-            "angiomyolipoma": 9,
-            "wilms_tumor": 10,
-            "cyst": 11,
-            "mest": 12,
-            "other": 13,
-            None: 14
-        }
-        self.pathology_t_stage_map = {
-            "1a": 0, "1b": 1, "2a": 2, "2b": 3, "3": 4, "4": 5, "na": 6, None: 7
-        }
+        self.numerical_keys = list(SAFE_NUMERICAL_KEYS)
+        if include_radiographic_size:
+            self.numerical_keys += OPTIONAL_RADIOLOGY_KEYS
 
     def __len__(self):
         return len(self.cases)
 
-    def normalize(self, x, key):
-        if self.stats is None or x is None:
-            return 0.0
+    def normalize_value(self, case: Dict, key: str) -> Tuple[float, float]:
+        value = get_nested(case, key)
+        is_missing = value is None
+        if is_missing:
+            return 0.0, 1.0
 
-        mean, std = self.stats[key]
-
+        mean, std = self.stats.get(key, (0.0, 1.0))
         if std < 1e-6:
-            return 0.0
+            std = 1.0
+        return float((float(value) - mean) / std), 0.0
 
-        return (x - mean) / std
+    def map_category(self, case: Dict, key: str) -> int:
+        mapping = CATEGORICAL_MAPS[key]
+        value = case.get(key)
+        if value is None:
+            return mapping["__missing__"]
+        return mapping.get(value, mapping["__missing__"])
 
     def __getitem__(self, idx):
         case_id = self.cases[idx]
-        
         case = self.data[case_id]
 
-        # ---- numerical ----
-        numericals = np.array([
-            self.normalize(case.get("bmi"), "bmi"),
-            self.normalize(case.get("age_at_nephrectomy"), "age_at_nephrectomy"),
-            self.normalize(case.get("pathologic_size"), "pathologic_size"),
-            self.normalize(case.get("radiographic_size"), "radiographic_size"),
-            self.normalize(case.get("hospitalization"), "hospitalization"),
-        ], dtype=np.float32)
+        numerical_values = []
+        missing_values = []
+        for key in self.numerical_keys:
+            value, missing = self.normalize_value(case, key)
+            numerical_values.append(value)
+            missing_values.append(missing)
 
-        # ---- comorbidities (binary vector) ----
-
-        SELECTED_COMORBIDITIES = [
-            "myocardial_infarction",
-            "localized_solid_tumor",
-            "congestive_heart_failure",
-            "uncomplicated_diabetes_mellitus",
-            "metastatic_solid_tumor",
-            "mild_liver_disease",
+        comorbidities = [
+            float(case.get("comorbidities", {}).get(key, False) is True)
+            for key in COMORBIDITY_KEYS
         ]
 
-        comorbidities = np.array(
-            [float(case.get("comorbidities", {}).get(k, False)) for k in SELECTED_COMORBIDITIES],
-            dtype=np.float32
-        )
-
-        # ---- categorical ----
-        gender = self.gender_map[case.get("gender")]
-        smoking_history = self.smoking_history_map[case.get("smoking_history")]
-        surgery_type = self.surgery_type_map[case.get("surgery_type")]
-        surgical_approach = self.surgical_approach_map[case.get("surgical_approach")]
-        tumor_histologic_subtype = self.tumor_histologic_subtype_map[case.get("tumor_histologic_subtype")]
-
-        # ---- ordinal ----
-        pathology_t_stage = self.pathology_t_stage_map[case.get("pathology_t_stage")]
-
         clinical_data = {
-            "numerical": torch.tensor(numericals),
-            "comorbidities": torch.tensor(comorbidities),
-            "gender": torch.tensor(gender),
-            "smoking_history": torch.tensor(smoking_history),
-            "surgery_type": torch.tensor(surgery_type),
-            "surgical_approach": torch.tensor(surgical_approach),
-            "tumor_histologic_subtype": torch.tensor(tumor_histologic_subtype),
-            "pathology_t_stage": torch.tensor(pathology_t_stage, dtype=torch.long)
+            "case_id": case_id,
+            "numerical": torch.tensor(numerical_values, dtype=torch.float32),
+            "numerical_missing": torch.tensor(missing_values, dtype=torch.float32),
+            "comorbidities": torch.tensor(comorbidities, dtype=torch.float32),
+            "gender": torch.tensor(self.map_category(case, "gender"), dtype=torch.long),
         }
 
         return clinical_data

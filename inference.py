@@ -1,127 +1,68 @@
 import os
 import numpy as np
-import matplotlib.pyplot as plt
-import torch
 import pandas as pd
+import torch
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from sklearn.metrics import ConfusionMatrixDisplay
 
-from models.BiomedUNet import BiomedCLIPUNetFiLM
+from models.BiomedUNet_FiLM_ClinicalEncoder import BiomedCLIPUNetFiLMClinicalEncoder
 
-selected_class_rgb = [
-    [0, 0, 0],          # background (black)
-    [255, 255, 0],      # kidney (yellow)
-    [0, 0, 255],        # tumor (blue)
-    [0, 255, 0]         # cyst (green)
-]
 
-def colour_code_segmentation(image):
-    colour_code = np.array(selected_class_rgb)
-    x = colour_code[image.astype(int)]
-    return x
+CLASS_NAMES = ["background", "kidney", "tumor", "cyst"]
 
-def DSC_IoU_EachClass_Softmax(predicted, target, out_classes, smooth=1e-10):
-    pred = torch.argmax(predicted, dim=1)
+CLASS_RGB = np.array([
+    [0, 0, 0],
+    [255, 255, 0],
+    [0, 0, 255],
+    [0, 255, 0],
+], dtype=np.uint8)
 
-    dice_list = []
-    iou_list = []
-    valid_classes = []
+HEC_DEFS = {
+    "kidney_and_masses": [1, 2, 3],
+    "masses": [2, 3],
+    "tumor": [2],
+}
 
-    for c in range(out_classes):
 
-        pred_c = (pred == c)
-        target_c = (target == c)
+def move_clinical_to_device(clinical_batch: dict, device):
+    out = {}
+    for key, value in clinical_batch.items():
+        if key == "case_id":
+            out[key] = value
+        elif torch.is_tensor(value):
+            out[key] = value.to(device)
+        else:
+            out[key] = value
+    return out
 
-        if target_c.sum() == 0:
-            continue
 
-        tp = (pred_c & target_c).sum().float()
-        fp = (pred_c & (~target_c)).sum().float()
-        fn = ((~pred_c) & target_c).sum().float()
-        # tn = ((~pred_c) & ~target_c).sum().float()
+def colour_code_segmentation(mask: np.ndarray) -> np.ndarray:
+    mask = mask.astype(np.int64)
+    return CLASS_RGB[mask]
 
-        dice_c = 2 * tp / (2 * tp + fp + fn + smooth)
-        iou_c  = tp / (tp + fp + fn + smooth)
 
-        dice_list.append(dice_c)
-        iou_list.append(iou_c)
-        valid_classes.append(c)
+def update_class_confusion_matrix(total_cm, pred, target, num_classes):
+    y_true = target.detach().cpu().numpy().astype(np.int64).reshape(-1)
+    y_pred = pred.detach().cpu().numpy().astype(np.int64).reshape(-1)
 
-    if len(dice_list) == 0:
-        return None, None, None
-    
-    dice_tensor = torch.stack(dice_list)
-    iou_tensor  = torch.stack(iou_list)
+    valid_mask = (
+        (y_true >= 0) & (y_true < num_classes) &
+        (y_pred >= 0) & (y_pred < num_classes)
+    )
 
-    return dice_tensor, iou_tensor, valid_classes
-
-def DSC_IoU_HEC_Softmax(predicted, target, smooth=1e-10):
-    """
-    predicted: logits, shape [B, C, H, W]
-    target:    labels, shape [B, H, W]
-    label map:
-        0 = background
-        1 = kidney
-        2 = tumor
-        3 = cyst
-    HECs:
-        - Kidney and Masses = kidney + tumor + cyst
-        - Kidney Mass       = tumor + cyst
-        - Tumor             = tumor
-    """
-    pred = torch.argmax(predicted, dim=1)  # [B, H, W]
-
-    hec_defs = {
-        "kidney_and_masses": [1, 2, 3],
-        "kidney_mass": [2, 3],
-        "tumor": [2],
-    }
-
-    result = {}
-
-    for region_name, class_ids in hec_defs.items():
-        pred_region = torch.zeros_like(pred, dtype=torch.bool)
-        target_region = torch.zeros_like(target, dtype=torch.bool)
-
-        for c in class_ids:
-            pred_region |= (pred == c)
-            target_region |= (target == c)
-
-        if target_region.sum() == 0:
-            result[f"{region_name}_dice"] = np.nan
-            result[f"{region_name}_iou"] = np.nan
-            continue
-
-        tp = (pred_region & target_region).sum().float()
-        fp = (pred_region & (~target_region)).sum().float()
-        fn = ((~pred_region) & target_region).sum().float()
-
-        dice = 2 * tp / (2 * tp + fp + fn + smooth)
-        iou = tp / (tp + fp + fn + smooth)
-
-        result[f"{region_name}_dice"] = dice.item()
-        result[f"{region_name}_iou"] = iou.item()
-
-    return result
-
-def update_confusion_matrix_sklearn(total_cm, output, labels, out_classes):
-    pred = torch.argmax(output, dim=1)   # [B, H, W]
-
-    y_true = labels.detach().cpu().numpy().reshape(-1)
-    y_pred = pred.detach().cpu().numpy().reshape(-1)
-
-    valid_mask = (y_true >= 0) & (y_true < out_classes)
     y_true = y_true[valid_mask]
     y_pred = y_pred[valid_mask]
 
-    cm_batch = confusion_matrix(
-        y_true,
-        y_pred,
-        labels=np.arange(out_classes)
-    )
+    indices = num_classes * y_true + y_pred
+    cm_batch = np.bincount(indices, minlength=num_classes * num_classes)
+    cm_batch = cm_batch.reshape(num_classes, num_classes)
 
     total_cm += cm_batch
     return total_cm
 
-def metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
+
+def class_metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
     total = cm.sum()
     row_sum = cm.sum(axis=1)
     col_sum = cm.sum(axis=0)
@@ -141,237 +82,270 @@ def metrics_from_confusion_matrix(cm, class_names, smooth=1e-10):
         specificity = tn / (tn + fp + smooth)
 
         records.append({
+            "class_id": c,
             "class": class_name,
             "tp": tp,
             "fp": fp,
             "fn": fn,
             "tn": tn,
-            "dice_from_cm": dice,
-            "iou_from_cm": iou,
+            "dice": dice,
+            "iou": iou,
             "precision": precision,
             "recall": recall,
             "specificity": specificity,
         })
 
-    return pd.DataFrame(records)
-
-def compute_hec_dataset_metrics(all_preds, all_targets, smooth=1e-10):
-    """
-    all_preds, all_targets: list of tensors [B, H, W] hoặc đã flatten
-    Tính metric trên toàn dataset theo HEC.
-    """
-    hec_defs = {
-        "kidney_and_masses": [1, 2, 3],
-        "kidney_mass": [2, 3],
-        "tumor": [2],
+    df = pd.DataFrame(records)
+    mean_metrics = {
+        "foreground_mean_dice": float(df["dice"].mean()),
+        "foreground_mean_iou": float(df["iou"].mean()),
     }
+    return df, mean_metrics
 
-    records = []
 
-    pred_all = torch.cat(all_preds, dim=0)      # [N, H, W]
-    target_all = torch.cat(all_targets, dim=0)  # [N, H, W]
+def init_hec_counts():
+    return {name: {"tp": 0, "fp": 0, "fn": 0, "tn": 0} for name in HEC_DEFS}
 
-    for region_name, class_ids in hec_defs.items():
-        pred_region = torch.zeros_like(pred_all, dtype=torch.bool)
-        target_region = torch.zeros_like(target_all, dtype=torch.bool)
+
+def update_hec_counts(counts, pred, target):
+    for region_name, class_ids in HEC_DEFS.items():
+        pred_region = torch.zeros_like(pred, dtype=torch.bool)
+        target_region = torch.zeros_like(target, dtype=torch.bool)
 
         for c in class_ids:
-            pred_region |= (pred_all == c)
-            target_region |= (target_all == c)
+            pred_region |= (pred == c)
+            target_region |= (target == c)
 
-        tp = (pred_region & target_region).sum().item()
-        fp = (pred_region & (~target_region)).sum().item()
-        fn = ((~pred_region) & target_region).sum().item()
+        counts[region_name]["tp"] += int(torch.logical_and(pred_region, target_region).sum().item())
+        counts[region_name]["fp"] += int(torch.logical_and(pred_region, ~target_region).sum().item())
+        counts[region_name]["fn"] += int(torch.logical_and(~pred_region, target_region).sum().item())
+        counts[region_name]["tn"] += int(torch.logical_and(~pred_region, ~target_region).sum().item())
 
+    return counts
+
+
+def hec_metrics_from_counts(counts, smooth=1e-10):
+    records = []
+    for region_name, c in counts.items():
+        tp, fp, fn, tn = c["tp"], c["fp"], c["fn"], c["tn"]
         dice = (2 * tp) / (2 * tp + fp + fn + smooth)
         iou = tp / (tp + fp + fn + smooth)
         precision = tp / (tp + fp + smooth)
         recall = tp / (tp + fn + smooth)
+        specificity = tn / (tn + fp + smooth)
 
         records.append({
             "region": region_name,
-            "tp": tp,
-            "fp": fp,
-            "fn": fn,
-            "dice": dice,
-            "iou": iou,
-            "precision": precision,
-            "recall": recall,
+            "tp": int(tp),
+            "fp": int(fp),
+            "fn": int(fn),
+            "tn": int(tn),
+            "dice": float(dice),
+            "iou": float(iou),
+            "precision": float(precision),
+            "recall": float(recall),
+            "specificity": float(specificity),
         })
 
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    mean_metrics = {
+        "mean_hec_dice": float(df["dice"].mean()),
+        "mean_hec_iou": float(df["iou"].mean()),
+    }
+    return df, mean_metrics
 
-def inference(valid_loader, valid_set, device, out_classes):
-    best_model = BiomedCLIPUNetFiLM(
-        in_classes=1,
+
+def save_confusion_matrix_plot(cm, labels, title, save_path):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    disp.plot(ax=ax, cmap="Blues", values_format="d", colorbar=False)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+
+def save_hec_confusion_matrices(hec_counts, result_dir):
+    summary_rows = []
+    for region_name, c in hec_counts.items():
+        binary_cm = np.array([
+            [c["tn"], c["fp"]],
+            [c["fn"], c["tp"]],
+        ], dtype=np.int64)
+
+        cm_df = pd.DataFrame(
+            binary_cm,
+            index=[f"GT_not_{region_name}", f"GT_{region_name}"],
+            columns=[f"Pred_not_{region_name}", f"Pred_{region_name}"],
+        )
+        cm_df.to_csv(os.path.join(result_dir, f"confusion_matrix_hec_{region_name}.csv"))
+
+        save_confusion_matrix_plot(
+            binary_cm,
+            labels=[f"not_{region_name}", region_name],
+            title=f"HEC Confusion Matrix: {region_name}",
+            save_path=os.path.join(result_dir, f"confusion_matrix_hec_{region_name}.png"),
+        )
+
+        summary_rows.append({
+            "region": region_name,
+            "tn": int(c["tn"]),
+            "fp": int(c["fp"]),
+            "fn": int(c["fn"]),
+            "tp": int(c["tp"]),
+        })
+
+    pd.DataFrame(summary_rows).to_csv(
+        os.path.join(result_dir, "confusion_matrix_hec_summary.csv"),
+        index=False,
+    )
+
+
+def visualize_samples(model, dataset, device, result_dir, sample_indices=None):
+    if sample_indices is None:
+        sample_indices = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300]
+
+    vis_dir = os.path.join(result_dir, "visualizations")
+    os.makedirs(vis_dir, exist_ok=True)
+    model.eval()
+
+    with torch.no_grad():
+        for idx in sample_indices:
+            if idx >= len(dataset):
+                continue
+
+            image, label, clinical_data = dataset[idx]
+            x = image.float().unsqueeze(0).to(device)
+            clinical_batch = {}
+            for key, value in clinical_data.items():
+                if key == "case_id":
+                    clinical_batch[key] = [value]
+                elif torch.is_tensor(value):
+                    clinical_batch[key] = value.unsqueeze(0).to(device)
+
+            logits = model(x, clinical_batch)
+            pred = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
+
+            image_np = image.squeeze(0).cpu().numpy()
+            label_np = label.cpu().numpy()
+
+            plt.figure(figsize=(15, 5))
+            plt.subplot(1, 3, 1)
+            plt.title(f"Input CT slice {idx}")
+            plt.imshow(image_np, cmap="gray")
+            plt.axis("off")
+
+            plt.subplot(1, 3, 2)
+            plt.title("Ground truth")
+            plt.imshow(colour_code_segmentation(label_np))
+            plt.axis("off")
+
+            plt.subplot(1, 3, 3)
+            plt.title("Prediction")
+            plt.imshow(colour_code_segmentation(pred))
+            plt.axis("off")
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(vis_dir, f"prediction_{idx}.png"))
+            plt.close()
+
+
+def inference(
+    test_loader,
+    test_dataset,
+    device,
+    out_classes=4,
+    checkpoint_path="./saved_BiomedCLIP_UNet_FiLM_model/best_model1.pt",
+    result_dir="./result_Biomed_UNet_FiLM_clinical_clean_metrics",
+    save_visuals=True,
+    n_numerical=4,
+    n_comorbidities=1,
+):
+    os.makedirs(result_dir, exist_ok=True)
+
+    model = BiomedCLIPUNetFiLMClinicalEncoder(
+        in_channels=1,
         out_classes=out_classes,
-        n_clinical=17,
-        biomed_embed_dim=512
+        biomed_embed_dim=512,
+        clinical_embed_dim=64,
+        n_numerical=n_numerical,
+        n_comorbidities=n_comorbidities,
     ).to(device)
 
-    best_checkpoint = torch.load(f'./saved_BiomedCLIP_UNet_model/best_model.pt')
-    best_model.load_state_dict(best_checkpoint['model'])
-    best_model.eval()
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if isinstance(checkpoint, dict) and "model" in checkpoint:
+        model.load_state_dict(checkpoint["model"])
+        print("Loaded checkpoint:", checkpoint_path)
+        print("Loaded epoch:", checkpoint.get("epoch", "N/A"))
+        print("Best valid metric:", checkpoint.get("best_valid_loss", checkpoint.get("best_mean_hec_dice", "N/A")))
+    else:
+        model.load_state_dict(checkpoint)
+        print("Loaded model weights:", checkpoint_path)
 
-    selected_class = ['background', 'kidney', 'tumor', 'cyst']
+    model.eval()
 
-    idx_arr = [10, 20, 50, 70, 80, 100, 120, 150, 170, 200, 250, 300, 350, 400, 450]
+    if save_visuals:
+        visualize_samples(model, test_dataset, device, result_dir)
 
-    with torch.no_grad():
-        for i in idx_arr:
-            image, label, clinical_data = valid_set[i]
-            x_tensor = image.to(device).unsqueeze(0)
-            
-            clinical_tensor = torch.cat([
-                clinical_data["numerical"].float(),
-                clinical_data["comorbidities"].float(),
-                clinical_data["gender"].view(1).float(),
-                clinical_data["smoking_history"].view(1).float(),
-                clinical_data["surgery_type"].view(1).float(),
-                clinical_data["surgical_approach"].view(1).float(),
-                clinical_data["tumor_histologic_subtype"].view(1).float(),
-                clinical_data["pathology_t_stage"].view(1).float()
-            ], dim=0)
-
-            clinical_batch = clinical_tensor.unsqueeze(0).to(device)
-
-            pred_mask_logits = best_model(x_tensor, clinical_batch)
-            pred_mask = pred_mask_logits.detach().squeeze().cpu().numpy()
-
-            pred_mask = np.transpose(pred_mask, (1, 2, 0))
-
-            channel_num = image.shape[0]
-
-            plt.figure(figsize=(5 * channel_num + 10, 5))
-
-            HU = [1, 2, 3]
-            for j in range(channel_num):
-                plt.subplot(1, channel_num + 2, j + 1)
-                plt.title(f'input image {HU[j]} {i}')
-                plt.imshow(image[j], cmap='gray')
-            
-            plt.subplot(1, channel_num + 2, channel_num + 1)
-            plt.title('ground-truth')
-            plt.imshow(label)
-
-            plt.subplot(1, channel_num + 2, channel_num + 2)
-            plt.title("prediction")
-            plt.imshow(colour_code_segmentation(np.argmax(pred_mask, axis=2)))
-
-            if not os.path.exists(f'./result'):
-                os.mkdir(f'./result')
-            plt.savefig(f'./result/prediction_{i}.png')
-
-    predictions = []
-    all_preds = []
-    all_targets = []
-    total_cm = np.zeros((out_classes, out_classes), dtype=np.int64)
+    class_cm = np.zeros((out_classes, out_classes), dtype=np.int64)
+    hec_counts = init_hec_counts()
 
     with torch.no_grad():
-        for images, labels, clinical_data in iter(valid_loader):
+        for images, labels, clinical_data in tqdm(test_loader, desc="Running clinical-aware inference"):
             images = images.float().to(device)
-            labels = labels.to(device)
+            labels = labels.long().to(device)
+            clinical_data = move_clinical_to_device(clinical_data, device)
 
-            clinical_tensor = torch.cat([
-                clinical_data["numerical"].float(),
-                clinical_data["comorbidities"].float(),
-                clinical_data["gender"].unsqueeze(1).float(),
-                clinical_data["smoking_history"].unsqueeze(1).float(),
-                clinical_data["surgery_type"].unsqueeze(1).float(),
-                clinical_data["surgical_approach"].unsqueeze(1).float(),
-                clinical_data["tumor_histologic_subtype"].unsqueeze(1).float(),
-                clinical_data["pathology_t_stage"].unsqueeze(1).float()
-            ], dim=1)
+            logits = model(images, clinical_data)
+            pred = torch.argmax(logits, dim=1)
 
-            clinical_batch = clinical_tensor.to(device)
+            class_cm = update_class_confusion_matrix(class_cm, pred, labels, out_classes)
+            hec_counts = update_hec_counts(hec_counts, pred, labels)
 
-            output = best_model(images, clinical_batch)
+    class_metrics_df, class_mean_metrics = class_metrics_from_confusion_matrix(class_cm, CLASS_NAMES)
+    hec_metrics_df, hec_mean_metrics = hec_metrics_from_counts(hec_counts)
 
-            pred = torch.argmax(output, dim=1)
+    class_metrics_path = os.path.join(result_dir, "metrics_classwise.csv")
+    hec_metrics_path = os.path.join(result_dir, "metrics_hec.csv")
 
-            all_preds.append(pred.cpu())
-            all_targets.append(labels.cpu())
+    class_metrics_df.to_csv(class_metrics_path, index=False)
+    hec_metrics_df.to_csv(hec_metrics_path, index=False)
 
-            batch_size = images.shape[0]
-            for b in range(batch_size):
-                case_output = output[b:b+1]
-                case_label = labels[b:b+1]
+    class_cm_df = pd.DataFrame(
+        class_cm,
+        index=[f"GT_{x}" for x in CLASS_NAMES],
+        columns=[f"Pred_{x}" for x in CLASS_NAMES],
+    )
+    class_cm_df.to_csv(os.path.join(result_dir, "confusion_matrix_classwise.csv"))
 
-                prediction = DSC_IoU_HEC_Softmax(case_output, case_label)
-                predictions.append(prediction)
+    save_confusion_matrix_plot(
+        class_cm,
+        labels=CLASS_NAMES,
+        title="Class-wise Confusion Matrix",
+        save_path=os.path.join(result_dir, "confusion_matrix_classwise.png"),
+    )
+    save_hec_confusion_matrices(hec_counts, result_dir)
 
-            total_cm = update_confusion_matrix_sklearn(total_cm, output, labels, out_classes)
+    print("\n==============================")
+    print("CLASS-WISE METRICS")
+    print("==============================")
+    for _, row in class_metrics_df.iterrows():
+        print(f"{row['class']:>6} | Dice: {row['dice']:.6f} | IoU: {row['iou']:.6f}")
+    print(
+        f"\nForeground Mean | Dice: {class_mean_metrics['foreground_mean_dice']:.6f} | "
+        f"IoU: {class_mean_metrics['foreground_mean_iou']:.6f}"
+    )
 
-            dice, iou = DSC_IoU_EachClass_Softmax(output, labels, out_classes=out_classes)
+    print("\n==============================")
+    print("HEC METRICS")
+    print("==============================")
+    for _, row in hec_metrics_df.iterrows():
+        print(f"{row['region']:>18} | Dice: {row['dice']:.6f} | IoU: {row['iou']:.6f}")
+    print(f"\nMean HEC | Dice: {hec_mean_metrics['mean_hec_dice']:.6f} | IoU: {hec_mean_metrics['mean_hec_iou']:.6f}")
 
-            prediction = {}
-
-            for idx, class_name in enumerate(selected_class):
-                prediction[f'{class_name.lower()}_dice'] = np.nan
-                prediction[f'{class_name.lower()}_iou'] = np.nan
-
-            for k, c in enumerate(valid_classes):
-                class_name = selected_class[c]
-
-                prediction[f'{class_name.lower()}_dice'] = dice[k].item()
-                prediction[f'{class_name.lower()}_iou'] = iou[k].item()
-
-            predictions.append(prediction)
-
-    result_dir = f'./result/'
-
-    if not os.path.exists(result_dir):
-        os.mkdir(result_dir)
-
-    df_csv = pd.DataFrame(predictions)
-    df_csv.to_csv(f"{result_dir}/prediction.csv")
-
-    print(df_csv.head())
-    print(df_csv.describe())
-
-    mean_kam_dice = df_csv["kidney_and_masses_dice"].mean()
-    mean_km_dice = df_csv["kidney_mass_dice"].mean()
-    mean_tumor_dice = df_csv["tumor_dice"].mean()
-
-    mean_kam_iou = df_csv["kidney_and_masses_iou"].mean()
-    mean_km_iou = df_csv["kidney_mass_iou"].mean()
-    mean_tumor_iou = df_csv["tumor_iou"].mean()
-
-    print(f"Kidney and Masses - Mean Dice: {mean_kam_dice:.6f}, Mean IoU: {mean_kam_iou:.6f}")
-    print(f"Kidney Mass       - Mean Dice: {mean_km_dice:.6f}, Mean IoU: {mean_km_iou:.6f}")
-    print(f"Tumor             - Mean Dice: {mean_tumor_dice:.6f}, Mean IoU: {mean_tumor_iou:.6f}")
-
-    print(f"AVG HEC Dice: {np.mean([mean_kam_dice, mean_km_dice, mean_tumor_dice]):.6f}")
-    print(f"AVG HEC IoU : {np.mean([mean_kam_iou, mean_km_iou, mean_tumor_iou]):.6f}")
-
-    hec_metrics_df = compute_hec_dataset_metrics(all_preds, all_targets)
-    hec_metrics_df.to_csv(f"{result_dir}/metrics_hec_dataset_level.csv", index=False)
-
-    print("\nDataset-level HEC Metrics:")
-    print(hec_metrics_df)
-
-    cm_df = pd.DataFrame(total_cm, index=selected_class, columns=selected_class)
-    cm_df.to_csv(f"{result_dir}/confusion_matrix.csv")
-
-    print("\nConfusion Matrix (rows=GT, cols=Pred):")
-    print(cm_df)
-
-    cm_metrics_df = metrics_from_confusion_matrix(total_cm, selected_class)
-    cm_metrics_df.to_csv(f"{result_dir}/metrics_from_confusion_matrix.csv", index=False)
-
-    print("\nMetrics from Confusion Matrix:")
-    print(cm_metrics_df)
-
-    avg_dice_fg_cm = cm_metrics_df.loc[cm_metrics_df["class"] != "background", "dice_from_cm"].mean()
-    avg_iou_fg_cm = cm_metrics_df.loc[cm_metrics_df["class"] != "background", "iou_from_cm"].mean()
-
-    print(f'\nAVG DSC from CM (foreground only): {avg_dice_fg_cm:.6f}')
-    print(f'AVG IoU from CM (foreground only): {avg_iou_fg_cm:.6f}')
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    disp = ConfusionMatrixDisplay(confusion_matrix=total_cm, display_labels=selected_class)
-    disp.plot(ax=ax, cmap='Blues', values_format='d', colorbar=False)
-    plt.title("Confusion Matrix (rows=GT, cols=Pred)")
-    plt.tight_layout()
-    plt.savefig(f"{result_dir}/confusion_matrix.png")
-    plt.close()
+    print("\nSaved files:")
+    print(f"- {class_metrics_path}")
+    print(f"- {hec_metrics_path}")
+    print(f"- {os.path.join(result_dir, 'confusion_matrix_classwise.csv')}")
+    print(f"- {os.path.join(result_dir, 'confusion_matrix_classwise.png')}")
+    print(f"- {os.path.join(result_dir, 'confusion_matrix_hec_summary.csv')}")

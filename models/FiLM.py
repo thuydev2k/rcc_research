@@ -11,6 +11,9 @@ class FiLM(nn.Module):
             nn.Linear(128, n_features * 2)
         )
 
+        nn.init.zeros_(self.controller[-1].weight)
+        nn.init.zeros_(self.controller[-1].bias)
+
     def forward(self, x, clinical_vector):
         params = self.controller(clinical_vector)
         
