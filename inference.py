@@ -236,17 +236,6 @@ def save_hec_confusion_matrices(
     hec_counts: dict,
     result_dir: str,
 ):
-    """
-    Save one binary confusion matrix per HEC region.
-
-    Matrix layout:
-
-        rows = GT
-        cols = Prediction
-
-        [[TN, FP],
-         [FN, TP]]
-    """
     summary_rows = []
 
     for region_name, c in hec_counts.items():
@@ -295,6 +284,66 @@ def save_hec_confusion_matrices(
         index=False,
     )
 
+def find_tumor_cyst_slice_indices(
+    dataset,
+    max_tumor=20,
+    max_cyst=20,
+    max_both=20,
+):
+    tumor_indices = []
+    cyst_indices = []
+    both_indices = []
+
+    for idx in range(len(dataset)):
+        sample = dataset[idx]
+
+        # If dataset returns (image, label)
+        image, label = sample[0], sample[1]
+
+        if torch.is_tensor(label):
+            label_np = label.cpu().numpy()
+        else:
+            label_np = label
+
+        has_tumor = np.any(label_np == 2)
+        has_cyst = np.any(label_np == 3)
+
+        if has_tumor and has_cyst:
+            both_indices.append(idx)
+        elif has_tumor:
+            tumor_indices.append(idx)
+        elif has_cyst:
+            cyst_indices.append(idx)
+
+    print("Found lesion slices:")
+    print(f"Tumor-only slices: {len(tumor_indices)}")
+    print(f"Cyst-only slices:  {len(cyst_indices)}")
+    print(f"Tumor+cyst slices: {len(both_indices)}")
+
+    selected_indices = (
+        both_indices[:max_both]
+        + tumor_indices[:max_tumor]
+        + cyst_indices[:max_cyst]
+    )
+
+    print(f"Selected visualization slices: {len(selected_indices)}")
+    print(selected_indices)
+
+    return selected_indices
+
+def binary_dice(pred_mask, gt_mask, class_id, smooth=1e-10):
+    pred_c = pred_mask == class_id
+    gt_c = gt_mask == class_id
+
+    if gt_c.sum() == 0:
+        return np.nan
+
+    tp = np.logical_and(pred_c, gt_c).sum()
+    fp = np.logical_and(pred_c, ~gt_c).sum()
+    fn = np.logical_and(~pred_c, gt_c).sum()
+
+    dice = (2 * tp) / (2 * tp + fp + fn + smooth)
+    return dice
 
 def visualize_samples(
     model,
@@ -304,7 +353,12 @@ def visualize_samples(
     sample_indices=None,
 ):
     if sample_indices is None:
-        sample_indices = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300]
+        sample_indices = find_tumor_cyst_slice_indices(
+            dataset,
+            max_tumor=30,
+            max_cyst=30,
+            max_both=30,
+        )
 
     vis_dir = os.path.join(result_dir, "visualizations")
     os.makedirs(vis_dir, exist_ok=True)
@@ -325,7 +379,7 @@ def visualize_samples(
             image_np = image.squeeze(0).cpu().numpy()
             label_np = label.cpu().numpy()
 
-            plt.figure(figsize=(15, 5))
+            plt.figure(figsize=(20, 5))
 
             plt.subplot(1, 3, 1)
             plt.title(f"Input CT slice {idx}")
