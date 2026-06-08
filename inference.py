@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.metrics import ConfusionMatrixDisplay
 
-from models.BiomedUNet_FiLM_ClinicalEncoder import BiomedCLIPUNetFiLMClinicalEncoder
+from models.BiomedUNet_CTEHR_CrossAttention import BiomedCLIPUNetCTEHRAttention
 
 
 CLASS_NAMES = ["background", "kidney", "tumor", "cyst"]
@@ -321,21 +321,23 @@ def inference(
     test_dataset,
     device,
     out_classes=4,
-    checkpoint_path="./saved_BiomedCLIP_UNet_FiLM_model/best_model1.pt",
-    result_dir="./result_Biomed_UNet_FiLM_clinical_clean_metrics",
+    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_model/best_model_exp1.pt",
+    result_dir="./result_BiomedCLIP_UNet_CTEHR_exp1",
     save_visuals=True,
     n_numerical=4,
     n_comorbidities=1,
 ):
     os.makedirs(result_dir, exist_ok=True)
 
-    model = BiomedCLIPUNetFiLMClinicalEncoder(
+    model = BiomedCLIPUNetCTEHRAttention(
         in_channels=1,
         out_classes=out_classes,
         biomed_embed_dim=512,
         clinical_embed_dim=64,
         n_numerical=n_numerical,
         n_comorbidities=n_comorbidities,
+        num_clinical_tokens=4,
+        num_heads=8,
     ).to(device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
