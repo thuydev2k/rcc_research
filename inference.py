@@ -200,12 +200,7 @@ def save_hec_confusion_matrices(hec_counts, result_dir):
         index=False,
     )
 
-def find_tumor_cyst_slice_indices(
-    dataset,
-    max_tumor=20,
-    max_cyst=20,
-    max_both=20,
-):
+def find_tumor_cyst_slice_indices(dataset):
     tumor_indices = []
     cyst_indices = []
     both_indices = []
@@ -237,9 +232,9 @@ def find_tumor_cyst_slice_indices(
     print(f"Tumor+cyst slices: {len(both_indices)}")
 
     selected_indices = (
-        both_indices[:max_both]
-        + tumor_indices[:max_tumor]
-        + cyst_indices[:max_cyst]
+        both_indices[:30]
+        + tumor_indices[:30]
+        + cyst_indices[:30]
     )
 
     print(f"Selected visualization slices: {len(selected_indices)}")
@@ -266,9 +261,6 @@ def visualize_samples(model, dataset, device, result_dir, sample_indices=None):
     if sample_indices is None:
         sample_indices = find_tumor_cyst_slice_indices(
             dataset,
-            max_tumor=30,
-            max_cyst=30,
-            max_both=30,
         )
 
     vis_dir = os.path.join(result_dir, "visualizations")
@@ -321,8 +313,8 @@ def inference(
     test_dataset,
     device,
     out_classes=4,
-    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_model/best_model_exp1.pt",
-    result_dir="./result_BiomedCLIP_UNet_CTEHR_exp1",
+    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_model/best_model_exp2_film.pt",
+    result_dir="./result_BiomedCLIP_UNet_CTEHR_exp2_film_clean_metrics",
     save_visuals=True,
     n_numerical=4,
     n_comorbidities=1,

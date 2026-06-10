@@ -220,7 +220,7 @@ inference(
     test_dataset=test_dataset,
     device=device,
     out_classes=4,
-    checkpoint_path="./saved_BiomedCLIP_UNet_FiLM_model/best_model1.pt",
-    result_dir="./result_Biomed_UNet_FiLM_clinical_clean_metrics",
+    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_model/best_model_exp2_film.pt",
+    result_dir="./result_BiomedCLIP_UNet_CTEHR_exp2_film_clean_metrics",
     save_visuals=True,
 )

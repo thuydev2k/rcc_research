@@ -229,7 +229,7 @@ def segmentation_baseline(
                 "best_valid_loss": best_valid_loss,
                 "best_mean_hec_dice": best_mean_hec_dice,
                 "metrics": metrics,
-            }, os.path.join(save_dir, "best_model_exp1.pt"))
+            }, os.path.join(save_dir, "best_model_exp2_film.pt"))
 
             print("Model saved")
         else:
