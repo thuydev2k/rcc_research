@@ -118,7 +118,7 @@ class TumorCystBatchSampler(Sampler):
         self,
         dataset,
         batch_size,
-        tumor_ratio=0.25,
+        tumor_ratio=0.375,
         cyst_ratio=0.25,
         num_batches=None,
         seed=42,
