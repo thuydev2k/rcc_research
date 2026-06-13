@@ -163,63 +163,6 @@ class CTEHRCrossAttention(nn.Module):
 
         return fused_feat
 
-class ClinicalFiLM(nn.Module):
-    """
-    FiLM conditioning after CT-EHR cross-attention.
-
-    image_feat:
-        [B, C, H, W]
-
-    clinical_vector:
-        [B, clinical_embed_dim]
-
-    output:
-        [B, C, H, W]
-
-    Formula:
-        output = (1 + gamma) * image_feat + beta
-
-    The final layer is zero-initialized, so this module starts as identity:
-        gamma = 0
-        beta = 0
-        output = image_feat
-    """
-
-    def __init__(
-        self,
-        image_dim: int = 512,
-        clinical_embed_dim: int = 64,
-        hidden_dim: int = 128,
-        dropout: float = 0.10,
-    ):
-        super().__init__()
-
-        self.controller = nn.Sequential(
-            nn.LayerNorm(clinical_embed_dim),
-            nn.Linear(clinical_embed_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, image_dim * 2),
-        )
-
-        # Identity initialization.
-        nn.init.zeros_(self.controller[-1].weight)
-        nn.init.zeros_(self.controller[-1].bias)
-
-    def forward(self, image_feat, clinical_vector):
-        B, C, H, W = image_feat.shape
-
-        params = self.controller(clinical_vector)
-
-        gamma, beta = torch.split(params, C, dim=1)
-
-        gamma = gamma.view(B, C, 1, 1)
-        beta = beta.view(B, C, 1, 1)
-
-        out = (1.0 + gamma) * image_feat + beta
-
-        return out
-    
 
 class BiomedCLIPUNetCTEHRAttention(nn.Module):
     def __init__(
@@ -258,12 +201,6 @@ class BiomedCLIPUNetCTEHRAttention(nn.Module):
             dropout=0.10,
         )
 
-        self.clinical_film = ClinicalFiLM(
-            image_dim=512,
-            clinical_embed_dim=clinical_embed_dim,
-            hidden_dim=128,
-            dropout=0.10,
-        )
 
         self.up_conv4 = UpBlock(512, 1024, 256)
         self.up_conv3 = UpBlock(256, 512, 128)
@@ -296,7 +233,6 @@ class BiomedCLIPUNetCTEHRAttention(nn.Module):
         if clinical_data is not None:
             clinical_vector = self.clinical_encoder(clinical_data)
             x = self.ct_ehr_attention(x, clinical_vector)
-            x = self.clinical_film(x, clinical_vector)
             
         x = self.up_conv4(x, skip4)
         x = self.up_conv3(x, skip3)
