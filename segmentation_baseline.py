@@ -7,7 +7,7 @@ import torch
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
-from models.BiomedUNet_CTEHR_CrossAttention import BiomedCLIPUNetCTEHRAttention
+from models.BiomedUNet_MultiScaleClinicalFiLM import BiomedCLIPUNetMultiScaleClinicalFiLM
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss2D
 
 
@@ -174,7 +174,7 @@ def segmentation_baseline(
 ):
     os.makedirs(save_dir, exist_ok=True)
 
-    model = BiomedCLIPUNetCTEHRAttention(
+    model = BiomedCLIPUNetMultiScaleClinicalFiLM(
         in_channels=1,
         out_classes=out_classes,
         biomed_embed_dim=512,
@@ -183,6 +183,7 @@ def segmentation_baseline(
         n_comorbidities=n_comorbidities,
         num_clinical_tokens=4,
         num_heads=8,
+        use_bottleneck_fusion=True,
     ).to(device)
 
     scaler = torch.amp.GradScaler(device=device)
@@ -229,7 +230,7 @@ def segmentation_baseline(
                 "best_valid_loss": best_valid_loss,
                 "best_mean_hec_dice": best_mean_hec_dice,
                 "metrics": metrics,
-            }, os.path.join(save_dir, "best_model_exp2_film.pt"))
+            }, os.path.join(save_dir, "best_model_attention_film.pt"))
 
             print("Model saved")
         else:
