@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.metrics import ConfusionMatrixDisplay
 
-from models.BiomedUNet_CTEHR_CrossAttention import BiomedCLIPUNetCTEHRAttention
+from models.BiomedUNet_CTEHR_CrossAttention import BiomedCLIPUNetCTEHRAttentionPresence
 
 
 CLASS_NAMES = ["background", "kidney", "tumor", "cyst"]
@@ -281,7 +281,8 @@ def visualize_samples(model, dataset, device, result_dir, sample_indices=None):
                 elif torch.is_tensor(value):
                     clinical_batch[key] = value.unsqueeze(0).to(device)
 
-            logits = model(x, clinical_batch)
+            outputs = model(x, clinical_data, return_aux=True)
+            logits = outputs["out"]
             pred = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
 
             image_np = image.squeeze(0).cpu().numpy()
@@ -313,15 +314,15 @@ def inference(
     test_dataset,
     device,
     out_classes=4,
-    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_model/best_model_exp2_film.pt",
-    result_dir="./result_BiomedCLIP_UNet_CTEHR_exp2_film_clean_metrics",
+    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_model/best_model_Attn_Presence_model.pt",
+    result_dir="./result_BiomedCLIP_UNet_CTEHR_Attn_Presence_clean_metrics",
     save_visuals=True,
     n_numerical=4,
     n_comorbidities=1,
 ):
     os.makedirs(result_dir, exist_ok=True)
 
-    model = BiomedCLIPUNetCTEHRAttention(
+    model = BiomedCLIPUNetCTEHRAttentionPresence(
         in_channels=1,
         out_classes=out_classes,
         biomed_embed_dim=512,
@@ -330,6 +331,7 @@ def inference(
         n_comorbidities=n_comorbidities,
         num_clinical_tokens=4,
         num_heads=8,
+        presence_hidden_dim=128,
     ).to(device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -356,8 +358,15 @@ def inference(
             labels = labels.long().to(device)
             clinical_data = move_clinical_to_device(clinical_data, device)
 
-            logits = model(images, clinical_data)
+            outputs = model(
+                images,
+                clinical_data,
+                return_aux=True,
+            )
+
+            logits = outputs["out"]
             pred = torch.argmax(logits, dim=1)
+
 
             class_cm = update_class_confusion_matrix(class_cm, pred, labels, out_classes)
             hec_counts = update_hec_counts(hec_counts, pred, labels)

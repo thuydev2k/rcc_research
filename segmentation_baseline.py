@@ -4,10 +4,11 @@ import os
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
-from models.BiomedUNet_CTEHR_CrossAttention import BiomedCLIPUNetCTEHRAttention
+from models.BiomedUNet_CTEHR_CrossAttention import BiomedCLIPUNetCTEHRAttentionPresence
 from losses.SoftDiceCrossEntropyLoss import SoftDiceCrossEntropyLoss2D
 
 
@@ -160,6 +161,153 @@ def _compute_dice_iou_from_counts(counts):
 
     return metrics
 
+def build_presence_targets(labels):
+    """
+    labels:
+        [B, H, W]
+
+    Output:
+        presence_targets:
+            [B, 2]
+
+    Channels:
+        0 = has_tumor
+        1 = has_cyst
+    """
+
+    # has_mass = ((labels == 2) | (labels == 3)).any(dim=(1, 2)).float()
+    has_tumor = (labels == 2).any(dim=(1, 2)).float()
+    has_cyst = (labels == 3).any(dim=(1, 2)).float()
+
+    presence_targets = torch.stack(
+        [has_tumor, has_cyst],
+        dim=1,
+    )
+
+    return presence_targets
+
+
+def compute_seg_presence_loss(
+    outputs,
+    labels,
+    seg_criterion,
+    presence_weight: float = 0.1,
+    presence_pos_weight=None,
+):
+    """
+    outputs:
+        {
+            "out": [B, 4, H, W],
+            "presence_logits": [B, 2]
+        }
+
+    labels:
+        [B, H, W]
+    """
+
+    seg_logits = outputs["out"]
+    presence_logits = outputs["presence_logits"]
+
+    seg_loss = seg_criterion(seg_logits, labels)
+
+    presence_targets = build_presence_targets(labels).to(
+        device=presence_logits.device,
+        dtype=presence_logits.dtype,
+    )
+
+    if presence_pos_weight is not None:
+        presence_pos_weight = presence_pos_weight.to(
+            device=presence_logits.device,
+            dtype=presence_logits.dtype,
+        )
+
+    presence_loss = F.binary_cross_entropy_with_logits(
+        presence_logits,
+        presence_targets,
+        pos_weight=presence_pos_weight,
+    )
+
+    total_loss = seg_loss + presence_weight * presence_loss
+
+    return total_loss, seg_logits, presence_loss, presence_logits, presence_targets
+
+class PresenceMetricTracker:
+    """
+    Slice-level metrics for auxiliary tumor/cyst presence head.
+
+    Class 0: tumor presence
+    Class 1: cyst presence
+    """
+
+    def __init__(self, threshold=0.5):
+        self.threshold = threshold
+        self.reset()
+
+    def reset(self):
+        self.tp = torch.zeros(2)
+        self.fp = torch.zeros(2)
+        self.fn = torch.zeros(2)
+        self.tn = torch.zeros(2)
+        self.total_loss = 0.0
+        self.num_batches = 0
+
+    @torch.no_grad()
+    def update(self, presence_logits, presence_targets, presence_loss=None):
+        """
+        presence_logits:
+            [B, 2]
+
+        presence_targets:
+            [B, 2]
+        """
+
+        probs = torch.sigmoid(presence_logits)
+        preds = (probs >= self.threshold).float()
+        targets = presence_targets.float()
+
+        preds = preds.detach().cpu()
+        targets = targets.detach().cpu()
+
+        self.tp += ((preds == 1) & (targets == 1)).sum(dim=0)
+        self.fp += ((preds == 1) & (targets == 0)).sum(dim=0)
+        self.fn += ((preds == 0) & (targets == 1)).sum(dim=0)
+        self.tn += ((preds == 0) & (targets == 0)).sum(dim=0)
+
+        if presence_loss is not None:
+            self.total_loss += presence_loss.item()
+            self.num_batches += 1
+
+    def compute(self):
+        eps = 1e-8
+
+        precision = self.tp / (self.tp + self.fp + eps)
+        recall = self.tp / (self.tp + self.fn + eps)
+        dice = (2 * self.tp) / (2 * self.tp + self.fp + self.fn + eps)
+        accuracy = (self.tp + self.tn) / (
+            self.tp + self.fp + self.fn + self.tn + eps
+        )
+
+        avg_loss = self.total_loss / max(self.num_batches, 1)
+
+        metrics = {
+            "presence_loss": avg_loss,
+
+            "tumor_precision": precision[0].item(),
+            "tumor_recall": recall[0].item(),
+            "tumor_dice": dice[0].item(),
+            "tumor_accuracy": accuracy[0].item(),
+
+            "cyst_precision": precision[1].item(),
+            "cyst_recall": recall[1].item(),
+            "cyst_dice": dice[1].item(),
+            "cyst_accuracy": accuracy[1].item(),
+
+            "mean_presence_dice": dice.mean().item(),
+            "mean_presence_recall": recall.mean().item(),
+            "mean_presence_precision": precision.mean().item(),
+        }
+
+        return metrics
 
 def segmentation_baseline(
     train_loader,
@@ -174,7 +322,7 @@ def segmentation_baseline(
 ):
     os.makedirs(save_dir, exist_ok=True)
 
-    model = BiomedCLIPUNetCTEHRAttention(
+    model = BiomedCLIPUNetCTEHRAttentionPresence(
         in_channels=1,
         out_classes=out_classes,
         biomed_embed_dim=512,
@@ -183,6 +331,7 @@ def segmentation_baseline(
         n_comorbidities=n_comorbidities,
         num_clinical_tokens=4,
         num_heads=8,
+        presence_hidden_dim=128,
     ).to(device)
 
     scaler = torch.amp.GradScaler(device=device)
@@ -205,8 +354,8 @@ def segmentation_baseline(
             print(f"Early stopping at epoch {i}")
             break
 
-        train_loss = train_fn(train_loader, model, optimizer, device, criterion, scaler)
-        valid_loss, metrics = eval_fn(valid_loader, model, device, criterion)
+        train_loss, train_presence_metrics = train_fn(train_loader, model, optimizer, device, criterion, scaler, presence_weight=0.1)
+        valid_loss, metrics, valid_presence_metrics = eval_fn(valid_loader, model, device, criterion)
 
         if math.isnan(valid_loss) or math.isnan(train_loss):
             print(f"Early stopping at epoch {i} by NaN")
@@ -229,7 +378,7 @@ def segmentation_baseline(
                 "best_valid_loss": best_valid_loss,
                 "best_mean_hec_dice": best_mean_hec_dice,
                 "metrics": metrics,
-            }, os.path.join(save_dir, "best_model_exp2_film.pt"))
+            }, os.path.join(save_dir, "best_model_Attn_Presence_model.pt"))
 
             print("Model saved")
         else:
@@ -255,6 +404,67 @@ def segmentation_baseline(
 
         writer.add_scalar("Metrics/kidney_and_masses_dice", metrics["kidney_and_masses_dice"], i)
         writer.add_scalar("Metrics/masses_dice", metrics["masses_dice"], i)
+
+        writer.add_scalar(
+            "Presence/train_loss",
+            train_presence_metrics["presence_loss"],
+            i,
+        )
+        writer.add_scalar(
+            "Presence/valid_loss",
+            valid_presence_metrics["presence_loss"],
+            i,
+        )
+
+        writer.add_scalar(
+            "Presence/train_tumor_dice",
+            train_presence_metrics["tumor_dice"],
+            i,
+        )
+        writer.add_scalar(
+            "Presence/valid_tumor_dice",
+            valid_presence_metrics["tumor_dice"],
+            i,
+        )
+
+        writer.add_scalar(
+            "Presence/train_cyst_dice",
+            train_presence_metrics["cyst_dice"],
+            i,
+        )
+        writer.add_scalar(
+            "Presence/valid_cyst_dice",
+            valid_presence_metrics["cyst_dice"],
+            i,
+        )
+
+        writer.add_scalar(
+            "Presence/valid_tumor_recall",
+            valid_presence_metrics["tumor_recall"],
+            i,
+        )
+        writer.add_scalar(
+            "Presence/valid_cyst_recall",
+            valid_presence_metrics["cyst_recall"],
+            i,
+        )
+
+         # ---------- Print classification metrics ----------
+        print(
+            f"Train Presence Loss: {train_presence_metrics['presence_loss']:.4f} | "
+            f"Train Tumor Dice: {train_presence_metrics['tumor_dice']:.4f} | "
+            f"Train Tumor Recall: {train_presence_metrics['tumor_recall']:.4f} | "
+            f"Train Cyst Dice: {train_presence_metrics['cyst_dice']:.4f} | "
+            f"Train Cyst Recall: {train_presence_metrics['cyst_recall']:.4f}"
+        )
+
+        print(
+            f"Valid Presence Loss: {valid_presence_metrics['presence_loss']:.4f} | "
+            f"Valid Tumor Dice: {valid_presence_metrics['tumor_dice']:.4f} | "
+            f"Valid Tumor Recall: {valid_presence_metrics['tumor_recall']:.4f} | "
+            f"Valid Cyst Dice: {valid_presence_metrics['cyst_dice']:.4f} | "
+            f"Valid Cyst Recall: {valid_presence_metrics['cyst_recall']:.4f}"
+        )
 
         # ---------- Print results ----------
         print(
@@ -304,9 +514,11 @@ def segmentation_baseline(
     writer.close()
 
 
-def train_fn(loader, model, optimizer, device, criterion, scaler=None):
+def train_fn(loader, model, optimizer, device, criterion, scaler=None, presence_weight=0.1):
     model.train()
     total_loss = 0.0
+
+    presence_tracker = PresenceMetricTracker(threshold=0.5)
 
     for images, labels, clinical_batch in tqdm(loader):
         images = images.float().to(device)
@@ -317,29 +529,55 @@ def train_fn(loader, model, optimizer, device, criterion, scaler=None):
 
         if scaler is not None:
             with torch.amp.autocast(device_type="cuda"):
-                seg_out = model(images, clinical_batch)
-                loss = criterion(seg_out, labels)
+                outputs = model(images, clinical_batch, return_aux=True)
+
+                loss, seg_out, presence_loss, presence_logits, presence_targets = compute_seg_presence_loss(
+                    outputs=outputs,
+                    labels=labels,
+                    seg_criterion=criterion,
+                    presence_weight=presence_weight,
+                    presence_pos_weight=None,
+                )
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
         else:
-            seg_out = model(images, clinical_batch)
-            loss = criterion(seg_out, labels)
+            outputs = model(images, clinical_batch, return_aux=True)
+            loss, seg_out, presence_loss, presence_logits, presence_targets = compute_seg_presence_loss(
+                outputs=outputs,
+                labels=labels,
+                seg_criterion=criterion,
+                presence_weight=presence_weight,
+                presence_pos_weight=None,
+            )
             loss.backward()
             optimizer.step()
 
+        presence_tracker.update(
+            presence_logits=presence_logits,
+            presence_targets=presence_targets,
+            presence_loss=presence_loss,
+        )
+
         total_loss += loss.item()
 
-    return total_loss / len(loader)
+    avg_train_loss = total_loss / len(loader)
+    train_presence_metrics = presence_tracker.compute()
+
+    return avg_train_loss, train_presence_metrics
 
 
-def eval_fn(loader, model, device, criterion):
+def eval_fn(loader, model, device, criterion, presence_weight=0.1):
     model.eval()
     total_loss = 0.0
 
     counts = _init_counts()
+
+    presence_tracker = PresenceMetricTracker(threshold=0.5)
+
+    use_amp = torch.cuda.is_available() and str(device).startswith("cuda")
 
     with torch.no_grad():
         for images, labels, clinical_batch in tqdm(loader):
@@ -347,20 +585,46 @@ def eval_fn(loader, model, device, criterion):
             labels = labels.long().to(device)
             clinical_batch = move_clinical_to_device(clinical_batch, device)
 
-            if str(device).startswith("cuda"):
+            if use_amp:
                 with torch.amp.autocast(device_type="cuda"):
-                    predicted = model(images, clinical_batch)
-                    loss = criterion(predicted, labels)
+                    outputs = model(images, clinical_batch, return_aux=True)
+
+                    loss, predicted, presence_loss, presence_logits, presence_targets = compute_seg_presence_loss(
+                        outputs=outputs,
+                        labels=labels,
+                        seg_criterion=criterion,
+                        presence_weight=presence_weight,
+                        presence_pos_weight=None,
+                    )
             else:
-                predicted = model(images, clinical_batch)
-                loss = criterion(predicted, labels)
+                outputs = model(
+                    images,
+                    clinical_batch,
+                    return_aux=True,
+                )
+
+                loss, predicted, presence_loss, presence_logits, presence_targets = compute_seg_presence_loss(
+                    outputs=outputs,
+                    labels=labels,
+                    seg_criterion=criterion,
+                    presence_weight=presence_weight,
+                    presence_pos_weight=None,
+                )
 
             total_loss += loss.item()
 
+            presence_tracker.update(
+                presence_logits=presence_logits,
+                presence_targets=presence_targets,
+                presence_loss=presence_loss,
+            )
+
             # Update validation metrics
             _update_all_counts(counts=counts, logits=predicted, labels=labels)
+            
 
     valid_loss = total_loss / len(loader)
     metrics = _compute_dice_iou_from_counts(counts)
+    presence_metrics = presence_tracker.compute()
 
-    return valid_loss, metrics
+    return valid_loss, metrics, presence_metrics
