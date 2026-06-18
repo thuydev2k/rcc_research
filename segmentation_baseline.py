@@ -167,27 +167,23 @@ def _compute_dice_iou_from_counts(counts):
 
 SIDE_CLASS_NAMES = [
     "left_tumor",
-    "left_cyst",
     "right_tumor",
-    "right_cyst",
 ]
 
 
-def build_side_presence_targets(labels):
+def build_side_tumor_targets(labels):
     """
-    Build side-aware tumor/cyst presence targets from segmentation labels.
+    Build side-aware tumor presence targets.
 
     labels:
         [B, H, W]
 
     Output:
-        [B, 4]
+        [B, 2]
 
     Order:
         0 = image-left tumor presence
-        1 = image-left cyst presence
-        2 = image-right tumor presence
-        3 = image-right cyst presence
+        1 = image-right tumor presence
     """
 
     B, H, W = labels.shape
@@ -197,17 +193,12 @@ def build_side_presence_targets(labels):
     right_half = labels[:, :, mid:]
 
     left_tumor = (left_half == 2).any(dim=(1, 2)).float()
-    left_cyst = (left_half == 3).any(dim=(1, 2)).float()
-
     right_tumor = (right_half == 2).any(dim=(1, 2)).float()
-    right_cyst = (right_half == 3).any(dim=(1, 2)).float()
 
     targets = torch.stack(
         [
             left_tumor,
-            left_cyst,
             right_tumor,
-            right_cyst,
         ],
         dim=1,
     )
@@ -222,16 +213,6 @@ def multilabel_focal_loss_with_logits(
     gamma=2.0,
     reduction="mean",
 ):
-    """
-    Multi-label focal loss.
-
-    logits:
-        [B, 4]
-
-    targets:
-        [B, 4]
-    """
-
     bce = F.binary_cross_entropy_with_logits(
         logits,
         targets,
@@ -253,8 +234,49 @@ def multilabel_focal_loss_with_logits(
 
     return focal
 
+@torch.no_grad()
+def compute_side_tumor_pos_weight(
+    train_loader,
+    device,
+    max_pos_weight=10.0,
+    eps=1e-6,
+):
+    """
+    pos_weight[c] = num_negative[c] / num_positive[c]
 
-def compute_side_presence_loss(
+    Classes:
+        0 = left_tumor
+        1 = right_tumor
+    """
+
+    pos = torch.zeros(2, dtype=torch.float64)
+    neg = torch.zeros(2, dtype=torch.float64)
+
+    for _, labels, _ in tqdm(train_loader, desc="Computing side tumor pos_weight"):
+        labels = labels.long()
+
+        targets = build_side_tumor_targets(labels)
+        targets = targets.double()
+
+        pos += targets.sum(dim=0)
+        neg += (1.0 - targets).sum(dim=0)
+
+    pos_weight = neg / (pos + eps)
+    pos_weight = torch.clamp(pos_weight, min=1.0, max=max_pos_weight)
+
+    print("\nSide-aware tumor target statistics:")
+    for idx, name in enumerate(SIDE_CLASS_NAMES):
+        print(
+            f"{name:>12} | "
+            f"positive: {int(pos[idx].item())} | "
+            f"negative: {int(neg[idx].item())} | "
+            f"pos_weight: {pos_weight[idx].item():.4f}"
+        )
+
+    return pos_weight.float().to(device)
+
+
+def compute_side_context_loss(
     side_logits,
     side_targets,
     lambda_bce=0.5,
@@ -263,8 +285,8 @@ def compute_side_presence_loss(
     pos_weight=None,
 ):
     """
-    L_side_presence =
-        lambda_bce * BCE
+    L_side_context =
+        lambda_bce * WeightedBCE
         + (1 - lambda_bce) * Focal
     """
 
@@ -292,27 +314,26 @@ def compute_side_presence_loss(
 
     return side_loss, bce_loss, focal_loss
 
-
 def compute_total_loss(
     outputs,
     labels,
     seg_criterion,
-    side_weight=0.1,
+    side_weight=0.05,
     lambda_bce=0.5,
     focal_alpha=0.25,
     focal_gamma=2.0,
     side_pos_weight=None,
 ):
     """
-    Final Exp1 loss:
+    Exp2 loss:
 
     L_total =
         L_DiceCE
-        + side_weight * L_side_presence
+        + alpha_dynamic * L_side_context
 
-    L_side_presence =
-        0.5 * L_BCE
-        + 0.5 * L_Focal
+    L_side_context =
+        0.5 * WeightedBCE
+        + 0.5 * Focal
     """
 
     seg_logits = outputs["out"]
@@ -320,12 +341,12 @@ def compute_total_loss(
 
     seg_loss = seg_criterion(seg_logits, labels)
 
-    side_targets = build_side_presence_targets(labels).to(
+    side_targets = build_side_tumor_targets(labels).to(
         device=side_logits.device,
         dtype=side_logits.dtype,
     )
 
-    side_loss, bce_loss, focal_loss = compute_side_presence_loss(
+    side_loss, bce_loss, focal_loss = compute_side_context_loss(
         side_logits=side_logits,
         side_targets=side_targets,
         lambda_bce=lambda_bce,
@@ -347,15 +368,13 @@ def compute_total_loss(
         side_targets,
     )
 
-class SidePresenceMetricTracker:
+class SideTumorMetricTracker:
     """
-    Metrics for side-aware multi-label classifier.
+    Metrics for side-aware tumor classifier.
 
     Classes:
         0 = left_tumor
-        1 = left_cyst
-        2 = right_tumor
-        3 = right_cyst
+        1 = right_tumor
     """
 
     def __init__(self, threshold=0.5):
@@ -363,10 +382,10 @@ class SidePresenceMetricTracker:
         self.reset()
 
     def reset(self):
-        self.tp = torch.zeros(4)
-        self.fp = torch.zeros(4)
-        self.fn = torch.zeros(4)
-        self.tn = torch.zeros(4)
+        self.tp = torch.zeros(2)
+        self.fp = torch.zeros(2)
+        self.fn = torch.zeros(2)
+        self.tn = torch.zeros(2)
 
         self.total_side_loss = 0.0
         self.total_bce_loss = 0.0
@@ -396,10 +415,8 @@ class SidePresenceMetricTracker:
 
         if side_loss is not None:
             self.total_side_loss += side_loss.item()
-
         if bce_loss is not None:
             self.total_bce_loss += bce_loss.item()
-
         if focal_loss is not None:
             self.total_focal_loss += focal_loss.item()
 
@@ -434,6 +451,53 @@ class SidePresenceMetricTracker:
             metrics[f"{name}_accuracy"] = accuracy[idx].item()
 
         return metrics
+
+
+class DynamicSideTumorWeight:
+    """
+    Dynamic side tumor classifier loss weight.
+
+    Weight increases only when:
+        1. tumor segmentation Dice improves
+        2. side tumor classifier validation mean F1 is acceptable
+    """
+
+    def __init__(
+        self,
+        alpha_min=0.05,
+        alpha_max=0.2,
+        tumor_threshold=0.85,
+        cls_threshold=0.7,
+    ):
+        self.alpha_min = alpha_min
+        self.alpha_max = alpha_max
+        self.tumor_threshold = tumor_threshold
+        self.cls_threshold = cls_threshold
+        self.current_weight = alpha_min
+
+    def get(self):
+        return self.current_weight
+
+    def update(self, tumor_dice, classifier_mean_f1):
+        tumor_score = float(tumor_dice)
+        cls_score = float(classifier_mean_f1)
+
+        tumor_ratio = min(max(tumor_score / self.tumor_threshold, 0.0), 1.0)
+        cls_ratio = min(max(cls_score / self.cls_threshold, 0.0), 1.0)
+
+        self.current_weight = self.alpha_min + (
+            self.alpha_max - self.alpha_min
+        ) * tumor_ratio * cls_ratio
+
+        info = {
+            "tumor_score": tumor_score,
+            "cls_score": cls_score,
+            "tumor_ratio": tumor_ratio,
+            "cls_ratio": cls_ratio,
+            "next_weight": self.current_weight,
+        }
+
+        return self.current_weight, info
     
 
 def segmentation_baseline(
@@ -445,7 +509,7 @@ def segmentation_baseline(
     out_classes=4,
     n_numerical=4,
     n_comorbidities=1,
-    save_dir="saved_BiomedCLIP_UNet_CTEHR_SideContext_Exp1_model",
+    save_dir="saved_BiomedCLIP_UNet_CTEHR_SideTumor_Exp2_Dynamic_model",
 ):
     os.makedirs(save_dir, exist_ok=True)
 
@@ -458,10 +522,11 @@ def segmentation_baseline(
         n_comorbidities=n_comorbidities,
         num_clinical_tokens=4,
         num_heads=8,
-
-        # New side-aware context-token settings
         side_hidden_dim=128,
-        num_context_tokens=5,
+
+        # Tumor-only semantic context tokens:
+        # global, left tumor, right tumor
+        num_context_tokens=3,
         context_dim=128,
     ).to(device)
 
@@ -475,6 +540,23 @@ def segmentation_baseline(
     criterion = SoftDiceCrossEntropyLoss2D().to(device)
 
     writer = SummaryWriter()
+
+    lambda_bce = 0.5
+    focal_alpha = 0.25
+    focal_gamma = 2.0
+
+    dynamic_side_weight = DynamicSideTumorWeight(
+        alpha_min=0.05,
+        alpha_max=0.2,
+        tumor_threshold=0.80,
+        cls_threshold=0.60,
+    )
+
+    side_pos_weight = compute_side_tumor_pos_weight(
+        train_loader=train_loader,
+        device=device,
+        max_pos_weight=10.0,
+    )
 
     side_weight = 0.1
     lambda_bce = 0.5
@@ -490,6 +572,8 @@ def segmentation_baseline(
             print(f"Early stopping at epoch {i}")
             break
 
+        side_weight = dynamic_side_weight.get()
+
         train_loss, train_seg_loss, train_side_metrics = train_fn(
             train_loader,
             model,
@@ -501,6 +585,7 @@ def segmentation_baseline(
             lambda_bce=lambda_bce,
             focal_alpha=focal_alpha,
             focal_gamma=focal_gamma,
+            side_pos_weight=side_pos_weight,
         )
 
         valid_loss, valid_seg_loss, metrics, valid_side_metrics = eval_fn(
@@ -512,6 +597,12 @@ def segmentation_baseline(
             lambda_bce=lambda_bce,
             focal_alpha=focal_alpha,
             focal_gamma=focal_gamma,
+            side_pos_weight=side_pos_weight,
+        )
+
+        next_side_weight, dynamic_info = dynamic_side_weight.update(
+            tumor_dice=metrics["tumor_dice"],
+            classifier_mean_f1=valid_side_metrics["mean_f1"],
         )
 
         if math.isnan(valid_loss) or math.isnan(train_loss):
@@ -542,7 +633,7 @@ def segmentation_baseline(
                 "lambda_bce": lambda_bce,
                 "focal_alpha": focal_alpha,
                 "focal_gamma": focal_gamma,
-            }, os.path.join(save_dir, "best_model_side_context_exp1.pt"))
+            }, os.path.join(save_dir, "best_model_side_tumor_exp2_dynamic.pt"))
 
             print("Model saved")
         else:
@@ -640,10 +731,20 @@ def segmentation_baseline(
         print(f"Best Mean HEC Dice: {best_mean_hec_dice:.4f}")
 
         print(
+            f"Dynamic Side Tumor Weight | "
+            f"Current: {side_weight:.4f} | "
+            f"Next: {next_side_weight:.4f} | "
+            f"Tumor Score: {dynamic_info['tumor_score']:.4f} | "
+            f"Cls Score: {dynamic_info['cls_score']:.4f} | "
+            f"Tumor Ratio: {dynamic_info['tumor_ratio']:.4f} | "
+            f"Cls Ratio: {dynamic_info['cls_ratio']:.4f}"
+        )
+
+        print(
             f"Train Loss | "
             f"Total: {train_loss:.4f} | "
             f"Seg: {train_seg_loss:.4f} | "
-            f"SideCls: {train_side_metrics['side_loss']:.4f} | "
+            f"SideTumorCls: {train_side_metrics['side_loss']:.4f} | "
             f"BCE: {train_side_metrics['bce_loss']:.4f} | "
             f"Focal: {train_side_metrics['focal_loss']:.4f}"
         )
@@ -652,35 +753,29 @@ def segmentation_baseline(
             f"Valid Loss | "
             f"Total: {valid_loss:.4f} | "
             f"Seg: {valid_seg_loss:.4f} | "
-            f"SideCls: {valid_side_metrics['side_loss']:.4f} | "
+            f"SideTumorCls: {valid_side_metrics['side_loss']:.4f} | "
             f"BCE: {valid_side_metrics['bce_loss']:.4f} | "
             f"Focal: {valid_side_metrics['focal_loss']:.4f}"
         )
 
         print(
-            f"Train Side Classifier F1 | "
+            f"Train Side Tumor Classifier F1 | "
             f"Left Tumor: {train_side_metrics['left_tumor_f1']:.4f} | "
-            f"Left Cyst: {train_side_metrics['left_cyst_f1']:.4f} | "
             f"Right Tumor: {train_side_metrics['right_tumor_f1']:.4f} | "
-            f"Right Cyst: {train_side_metrics['right_cyst_f1']:.4f} | "
             f"Mean: {train_side_metrics['mean_f1']:.4f}"
         )
 
         print(
-            f"Valid Side Classifier F1 | "
+            f"Valid Side Tumor Classifier F1 | "
             f"Left Tumor: {valid_side_metrics['left_tumor_f1']:.4f} | "
-            f"Left Cyst: {valid_side_metrics['left_cyst_f1']:.4f} | "
             f"Right Tumor: {valid_side_metrics['right_tumor_f1']:.4f} | "
-            f"Right Cyst: {valid_side_metrics['right_cyst_f1']:.4f} | "
             f"Mean: {valid_side_metrics['mean_f1']:.4f}"
         )
 
         print(
-            f"Valid Side Classifier Recall | "
+            f"Valid Side Tumor Classifier Recall | "
             f"Left Tumor: {valid_side_metrics['left_tumor_recall']:.4f} | "
-            f"Left Cyst: {valid_side_metrics['left_cyst_recall']:.4f} | "
             f"Right Tumor: {valid_side_metrics['right_tumor_recall']:.4f} | "
-            f"Right Cyst: {valid_side_metrics['right_cyst_recall']:.4f} | "
             f"Mean: {valid_side_metrics['mean_recall']:.4f}"
         )
 
@@ -699,13 +794,14 @@ def train_fn(
     lambda_bce=0.5,
     focal_alpha=0.25,
     focal_gamma=2.0,
+    side_pos_weight=None,
 ):
     model.train()
 
     total_loss = 0.0
     total_seg_loss = 0.0
 
-    side_tracker = SidePresenceMetricTracker(threshold=0.5)
+    side_tracker = SideTumorMetricTracker(threshold=0.5)
 
     use_amp = scaler is not None and str(device).startswith("cuda")
 
@@ -718,10 +814,7 @@ def train_fn(
 
         if use_amp:
             with torch.amp.autocast(device_type="cuda"):
-                outputs = model(
-                    images,
-                    clinical_batch,
-                )
+                outputs = model(images, clinical_batch)
 
                 (
                     loss,
@@ -740,7 +833,7 @@ def train_fn(
                     lambda_bce=lambda_bce,
                     focal_alpha=focal_alpha,
                     focal_gamma=focal_gamma,
-                    side_pos_weight=None,
+                    side_pos_weight=side_pos_weight,
                 )
 
             scaler.scale(loss).backward()
@@ -770,7 +863,7 @@ def train_fn(
                 lambda_bce=lambda_bce,
                 focal_alpha=focal_alpha,
                 focal_gamma=focal_gamma,
-                side_pos_weight=None,
+                side_pos_weight=side_pos_weight,
             )
 
             loss.backward()
@@ -803,6 +896,7 @@ def eval_fn(
     lambda_bce=0.5,
     focal_alpha=0.25,
     focal_gamma=2.0,
+    side_pos_weight=None
 ):
     model.eval()
 
@@ -810,7 +904,7 @@ def eval_fn(
     total_seg_loss = 0.0
 
     counts = _init_counts()
-    side_tracker = SidePresenceMetricTracker(threshold=0.5)
+    side_tracker = SideTumorMetricTracker(threshold=0.5)
 
     use_amp = str(device).startswith("cuda")
 
@@ -844,7 +938,7 @@ def eval_fn(
                         lambda_bce=lambda_bce,
                         focal_alpha=focal_alpha,
                         focal_gamma=focal_gamma,
-                        side_pos_weight=None,
+                        side_pos_weight=side_pos_weight,
                     )
             else:
                 outputs = model(
@@ -869,7 +963,7 @@ def eval_fn(
                     lambda_bce=lambda_bce,
                     focal_alpha=focal_alpha,
                     focal_gamma=focal_gamma,
-                    side_pos_weight=None,
+                    side_pos_weight=side_pos_weight,
                 )
 
             total_loss += loss.item()
