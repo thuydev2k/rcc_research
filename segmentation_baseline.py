@@ -167,23 +167,27 @@ def _compute_dice_iou_from_counts(counts):
 
 SIDE_CLASS_NAMES = [
     "left_tumor",
+    "left_cyst",
     "right_tumor",
+    "right_cyst",
 ]
 
 
-def build_side_tumor_targets(labels):
+def build_side_tumor_cyst_targets(labels):
     """
-    Build side-aware tumor presence targets.
+    Build side-aware tumor/cyst presence targets.
 
     labels:
         [B, H, W]
 
     Output:
-        [B, 2]
+        [B, 4]
 
     Order:
         0 = image-left tumor presence
-        1 = image-right tumor presence
+        1 = image-left cyst presence
+        2 = image-right tumor presence
+        3 = image-right cyst presence
     """
 
     B, H, W = labels.shape
@@ -193,12 +197,17 @@ def build_side_tumor_targets(labels):
     right_half = labels[:, :, mid:]
 
     left_tumor = (left_half == 2).any(dim=(1, 2)).float()
+    left_cyst = (left_half == 3).any(dim=(1, 2)).float()
+
     right_tumor = (right_half == 2).any(dim=(1, 2)).float()
+    right_cyst = (right_half == 3).any(dim=(1, 2)).float()
 
     targets = torch.stack(
         [
             left_tumor,
+            left_cyst,
             right_tumor,
+            right_cyst,
         ],
         dim=1,
     )
@@ -235,7 +244,7 @@ def multilabel_focal_loss_with_logits(
     return focal
 
 @torch.no_grad()
-def compute_side_tumor_pos_weight(
+def compute_side_tumor_cyst_pos_weight(
     train_loader,
     device,
     max_pos_weight=10.0,
@@ -246,16 +255,18 @@ def compute_side_tumor_pos_weight(
 
     Classes:
         0 = left_tumor
-        1 = right_tumor
+        1 = left_cyst
+        2 = right_tumor
+        3 = right_cyst
     """
 
-    pos = torch.zeros(2, dtype=torch.float64)
-    neg = torch.zeros(2, dtype=torch.float64)
+    pos = torch.zeros(4, dtype=torch.float64)
+    neg = torch.zeros(4, dtype=torch.float64)
 
     for _, labels, _ in tqdm(train_loader, desc="Computing side tumor pos_weight"):
         labels = labels.long()
 
-        targets = build_side_tumor_targets(labels)
+        targets = build_side_tumor_cyst_targets(labels)
         targets = targets.double()
 
         pos += targets.sum(dim=0)
@@ -341,7 +352,7 @@ def compute_total_loss(
 
     seg_loss = seg_criterion(seg_logits, labels)
 
-    side_targets = build_side_tumor_targets(labels).to(
+    side_targets = build_side_tumor_cyst_targets(labels).to(
         device=side_logits.device,
         dtype=side_logits.dtype,
     )
@@ -374,7 +385,9 @@ class SideTumorMetricTracker:
 
     Classes:
         0 = left_tumor
-        1 = right_tumor
+        1 = left_cyst
+        2 = right_tumor
+        3 = right_cyst
     """
 
     def __init__(self, threshold=0.5):
@@ -382,10 +395,10 @@ class SideTumorMetricTracker:
         self.reset()
 
     def reset(self):
-        self.tp = torch.zeros(2)
-        self.fp = torch.zeros(2)
-        self.fn = torch.zeros(2)
-        self.tn = torch.zeros(2)
+        self.tp = torch.zeros(4)
+        self.fp = torch.zeros(4)
+        self.fn = torch.zeros(4)
+        self.tn = torch.zeros(4)
 
         self.total_side_loss = 0.0
         self.total_bce_loss = 0.0
@@ -450,6 +463,17 @@ class SideTumorMetricTracker:
             metrics[f"{name}_recall"] = recall[idx].item()
             metrics[f"{name}_accuracy"] = accuracy[idx].item()
 
+        tumor_indices = torch.tensor([0, 2])
+        cyst_indices = torch.tensor([1, 3])
+
+        metrics["tumor_mean_f1"] = f1[tumor_indices].mean().item()
+        metrics["tumor_mean_precision"] = precision[tumor_indices].mean().item()
+        metrics["tumor_mean_recall"] = recall[tumor_indices].mean().item()
+
+        metrics["cyst_mean_f1"] = f1[cyst_indices].mean().item()
+        metrics["cyst_mean_precision"] = precision[cyst_indices].mean().item()
+        metrics["cyst_mean_recall"] = recall[cyst_indices].mean().item()
+
         return metrics
 
 
@@ -464,8 +488,8 @@ class DynamicSideTumorWeight:
 
     def __init__(
         self,
-        alpha_min=0.05,
-        alpha_max=0.2,
+        alpha_min=0.03,
+        alpha_max=0.13,
         tumor_threshold=0.85,
         cls_threshold=0.7,
     ):
@@ -526,7 +550,6 @@ def segmentation_baseline(
 
         # Tumor-only semantic context tokens:
         # global, left tumor, right tumor
-        num_context_tokens=3,
         context_dim=128,
     ).to(device)
 
@@ -546,13 +569,13 @@ def segmentation_baseline(
     focal_gamma = 2.0
 
     dynamic_side_weight = DynamicSideTumorWeight(
-        alpha_min=0.05,
-        alpha_max=0.2,
-        tumor_threshold=0.80,
-        cls_threshold=0.60,
+        alpha_min=0.03,
+        alpha_max=0.13,
+        tumor_threshold=0.85,
+        cls_threshold=0.7,
     )
 
-    side_pos_weight = compute_side_tumor_pos_weight(
+    side_pos_weight = compute_side_tumor_cyst_pos_weight(
         train_loader=train_loader,
         device=device,
         max_pos_weight=10.0,
@@ -633,7 +656,7 @@ def segmentation_baseline(
                 "lambda_bce": lambda_bce,
                 "focal_alpha": focal_alpha,
                 "focal_gamma": focal_gamma,
-            }, os.path.join(save_dir, "best_model_side_tumor_exp2_dynamic.pt"))
+            }, os.path.join(save_dir, "best_model_side_tumor_cyst_exp2_dynamic.pt"))
 
             print("Model saved")
         else:
@@ -659,6 +682,11 @@ def segmentation_baseline(
         writer.add_scalar("SideClassifier/valid_bce_loss", valid_side_metrics["bce_loss"], i)
         writer.add_scalar("SideClassifier/valid_focal_loss", valid_side_metrics["focal_loss"], i)
         writer.add_scalar("SideClassifier/valid_mean_f1", valid_side_metrics["mean_f1"], i)
+
+        writer.add_scalar("SideClassifier/valid_tumor_mean_f1", valid_side_metrics["tumor_mean_f1"], i)
+        writer.add_scalar("SideClassifier/valid_cyst_mean_f1", valid_side_metrics["cyst_mean_f1"], i)
+        writer.add_scalar("SideClassifier/valid_tumor_mean_recall", valid_side_metrics["tumor_mean_recall"], i)
+        writer.add_scalar("SideClassifier/valid_cyst_mean_recall", valid_side_metrics["cyst_mean_recall"], i)
 
         for class_name in SIDE_CLASS_NAMES:
             writer.add_scalar(
@@ -777,6 +805,20 @@ def segmentation_baseline(
             f"Left Tumor: {valid_side_metrics['left_tumor_recall']:.4f} | "
             f"Right Tumor: {valid_side_metrics['right_tumor_recall']:.4f} | "
             f"Mean: {valid_side_metrics['mean_recall']:.4f}"
+        )
+
+        print(
+            f"Valid Tumor/Cyst Side Classifier F1 | "
+            f"Tumor Mean: {valid_side_metrics['tumor_mean_f1']:.4f} | "
+            f"Cyst Mean: {valid_side_metrics['cyst_mean_f1']:.4f} | "
+            f"All Mean: {valid_side_metrics['mean_f1']:.4f}"
+        )
+
+        print(
+            f"Valid Tumor/Cyst Side Classifier Recall | "
+            f"Tumor Mean: {valid_side_metrics['tumor_mean_recall']:.4f} | "
+            f"Cyst Mean: {valid_side_metrics['cyst_mean_recall']:.4f} | "
+            f"All Mean: {valid_side_metrics['mean_recall']:.4f}"
         )
 
     writer.flush()

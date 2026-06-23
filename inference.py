@@ -31,10 +31,9 @@ SIDE_CLASS_NAMES = [
     "right_cyst",
 ]
 
-
-def build_side_presence_targets(labels):
+def build_side_tumor_cyst_targets(labels):
     """
-    Build side-aware tumor/cyst presence targets from segmentation labels.
+    Build side-aware tumor/cyst presence targets.
 
     labels:
         [B, H, W]
@@ -203,9 +202,9 @@ def hec_metrics_from_counts(counts, smooth=1e-10):
     }
     return df, mean_metrics
 
-class SidePresenceMetricTracker:
+class SideTumorCystMetricTracker:
     """
-    Test-time metrics for side-aware multi-label classifier.
+    Metrics for side-aware tumor/cyst classifier.
 
     Classes:
         0 = left_tumor
@@ -248,77 +247,124 @@ class SidePresenceMetricTracker:
             self.tp + self.fp + self.fn + self.tn + eps
         )
 
-        true_positive_rate = (self.tp + self.fn) / (
+        gt_positive_rate = (self.tp + self.fn) / (
             self.tp + self.fp + self.fn + self.tn + eps
         )
 
-        predicted_positive_rate = (self.tp + self.fp) / (
+        pred_positive_rate = (self.tp + self.fp) / (
             self.tp + self.fp + self.fn + self.tn + eps
         )
 
-        records = []
-
-        for idx, class_name in enumerate(SIDE_CLASS_NAMES):
-            records.append({
-                "class_id": idx,
-                "class": class_name,
-                "tp": int(self.tp[idx].item()),
-                "fp": int(self.fp[idx].item()),
-                "fn": int(self.fn[idx].item()),
-                "tn": int(self.tn[idx].item()),
-                "precision": float(precision[idx].item()),
-                "recall": float(recall[idx].item()),
-                "f1": float(f1[idx].item()),
-                "accuracy": float(accuracy[idx].item()),
-                "true_positive_rate": float(true_positive_rate[idx].item()),
-                "predicted_positive_rate": float(predicted_positive_rate[idx].item()),
-            })
-
-        df = pd.DataFrame(records)
-
-        mean_metrics = {
-            "mean_f1": float(df["f1"].mean()),
-            "mean_precision": float(df["precision"].mean()),
-            "mean_recall": float(df["recall"].mean()),
-            "mean_accuracy": float(df["accuracy"].mean()),
+        metrics = {
+            "mean_f1": f1.mean().item(),
+            "mean_precision": precision.mean().item(),
+            "mean_recall": recall.mean().item(),
+            "mean_accuracy": accuracy.mean().item(),
         }
 
-        return df, mean_metrics
+        for idx, name in enumerate(SIDE_CLASS_NAMES):
+            metrics[f"{name}_f1"] = f1[idx].item()
+            metrics[f"{name}_precision"] = precision[idx].item()
+            metrics[f"{name}_recall"] = recall[idx].item()
+            metrics[f"{name}_accuracy"] = accuracy[idx].item()
+            metrics[f"{name}_gt_positive_rate"] = gt_positive_rate[idx].item()
+            metrics[f"{name}_pred_positive_rate"] = pred_positive_rate[idx].item()
+
+        tumor_indices = torch.tensor([0, 2])
+        cyst_indices = torch.tensor([1, 3])
+
+        metrics["tumor_mean_f1"] = f1[tumor_indices].mean().item()
+        metrics["tumor_mean_precision"] = precision[tumor_indices].mean().item()
+        metrics["tumor_mean_recall"] = recall[tumor_indices].mean().item()
+
+        metrics["cyst_mean_f1"] = f1[cyst_indices].mean().item()
+        metrics["cyst_mean_precision"] = precision[cyst_indices].mean().item()
+        metrics["cyst_mean_recall"] = recall[cyst_indices].mean().item()
+
+        return metrics
+
+    def to_dataframe(self):
+        metrics = self.compute()
+
+        rows = []
+        for name in SIDE_CLASS_NAMES:
+            rows.append({
+                "class": name,
+                "f1": metrics[f"{name}_f1"],
+                "precision": metrics[f"{name}_precision"],
+                "recall": metrics[f"{name}_recall"],
+                "accuracy": metrics[f"{name}_accuracy"],
+                "gt_positive_rate": metrics[f"{name}_gt_positive_rate"],
+                "pred_positive_rate": metrics[f"{name}_pred_positive_rate"],
+            })
+
+        rows.append({
+            "class": "tumor_mean",
+            "f1": metrics["tumor_mean_f1"],
+            "precision": metrics["tumor_mean_precision"],
+            "recall": metrics["tumor_mean_recall"],
+            "accuracy": None,
+            "gt_positive_rate": None,
+            "pred_positive_rate": None,
+        })
+
+        rows.append({
+            "class": "cyst_mean",
+            "f1": metrics["cyst_mean_f1"],
+            "precision": metrics["cyst_mean_precision"],
+            "recall": metrics["cyst_mean_recall"],
+            "accuracy": None,
+            "gt_positive_rate": None,
+            "pred_positive_rate": None,
+        })
+
+        rows.append({
+            "class": "all_mean",
+            "f1": metrics["mean_f1"],
+            "precision": metrics["mean_precision"],
+            "recall": metrics["mean_recall"],
+            "accuracy": metrics["mean_accuracy"],
+            "gt_positive_rate": None,
+            "pred_positive_rate": None,
+        })
+
+        return pd.DataFrame(rows)
 
     def save_confusion_matrices(self, result_dir):
         summary_rows = []
 
-        for idx, class_name in enumerate(SIDE_CLASS_NAMES):
-            binary_cm = np.array([
+        for idx, name in enumerate(SIDE_CLASS_NAMES):
+            cm = np.array([
                 [int(self.tn[idx].item()), int(self.fp[idx].item())],
                 [int(self.fn[idx].item()), int(self.tp[idx].item())],
-            ], dtype=np.int64)
+            ])
 
             cm_df = pd.DataFrame(
-                binary_cm,
-                index=[f"GT_not_{class_name}", f"GT_{class_name}"],
-                columns=[f"Pred_not_{class_name}", f"Pred_{class_name}"],
+                cm,
+                index=[f"GT_not_{name}", f"GT_{name}"],
+                columns=[f"Pred_not_{name}", f"Pred_{name}"],
             )
 
-            cm_path = os.path.join(
+            csv_path = os.path.join(
                 result_dir,
-                f"confusion_matrix_side_classifier_{class_name}.csv",
+                f"confusion_matrix_side_{name}.csv",
+            )
+            png_path = os.path.join(
+                result_dir,
+                f"confusion_matrix_side_{name}.png",
             )
 
-            cm_df.to_csv(cm_path)
+            cm_df.to_csv(csv_path)
 
             save_confusion_matrix_plot(
-                binary_cm,
-                labels=[f"not_{class_name}", class_name],
-                title=f"Side Classifier Confusion Matrix: {class_name}",
-                save_path=os.path.join(
-                    result_dir,
-                    f"confusion_matrix_side_classifier_{class_name}.png",
-                ),
+                cm,
+                labels=[f"not_{name}", name],
+                title=f"Side Classifier Confusion Matrix: {name}",
+                save_path=png_path,
             )
 
             summary_rows.append({
-                "class": class_name,
+                "class": name,
                 "tn": int(self.tn[idx].item()),
                 "fp": int(self.fp[idx].item()),
                 "fn": int(self.fn[idx].item()),
@@ -326,10 +372,11 @@ class SidePresenceMetricTracker:
             })
 
         pd.DataFrame(summary_rows).to_csv(
-            os.path.join(result_dir, "confusion_matrix_side_classifier_summary.csv"),
+            os.path.join(result_dir, "confusion_matrix_side_tumor_cyst_summary.csv"),
             index=False,
         )
 
+        
 def save_confusion_matrix_plot(cm, labels, title, save_path):
     fig, ax = plt.subplots(figsize=(8, 6))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
@@ -469,9 +516,17 @@ def visualize_samples(model, dataset, device, result_dir, sample_indices=None):
 
             if side_logits is not None:
                 side_probs = torch.sigmoid(side_logits).squeeze(0).detach().cpu().numpy()
+
+                # Order:
+                # 0 = left_tumor
+                # 1 = left_cyst
+                # 2 = right_tumor
+                # 3 = right_cyst
                 side_info = (
-                    f"\nLT:{side_probs[0]:.2f} LC:{side_probs[1]:.2f} "
-                    f"RT:{side_probs[2]:.2f} RC:{side_probs[3]:.2f}"
+                    f"\nLT:{side_probs[0]:.2f} "
+                    f"LC:{side_probs[1]:.2f} "
+                    f"RT:{side_probs[2]:.2f} "
+                    f"RC:{side_probs[3]:.2f}"
                 )
 
             plt.figure(figsize=(15, 5))
@@ -500,8 +555,8 @@ def inference(
     test_dataset,
     device,
     out_classes=4,
-    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_SideContext_Exp1_model/best_model_side_context_exp1.pt",
-    result_dir="./result_BiomedCLIP_UNet_CTEHR_SideContext_Exp1",
+    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_SideTumor_Exp2_Dynamic_model/best_model_side_tumor_cyst_exp2_dynamic.pt",
+    result_dir="./result_BiomedCLIP_UNet_CTEHR_SideTumor_Exp2_Dynamic",
     save_visuals=True,
     n_numerical=4,
     n_comorbidities=1,
@@ -518,9 +573,8 @@ def inference(
         num_clinical_tokens=4,
         num_heads=8,
 
-        # New side-aware context-token settings
+        # Exp2 side-tumor context settings
         side_hidden_dim=128,
-        num_context_tokens=5,
         context_dim=128,
     ).to(device)
 
@@ -542,12 +596,12 @@ def inference(
     class_cm = np.zeros((out_classes, out_classes), dtype=np.int64)
     hec_counts = init_hec_counts()
 
-    side_tracker = SidePresenceMetricTracker(threshold=0.5)
+    side_tracker = SideTumorCystMetricTracker(threshold=0.5)
 
     with torch.no_grad():
         for images, labels, clinical_data in tqdm(
             test_loader,
-            desc="Running side-aware context inference",
+            desc="Running side-tumor context inference",
         ):
             images = images.float().to(device)
             labels = labels.long().to(device)
@@ -564,8 +618,7 @@ def inference(
             else:
                 raise RuntimeError(
                     "Expected model output to be a dict with keys "
-                    "'out' and 'side_logits'. "
-                    "Please call the side-aware context model with return_aux=True."
+                    "'out' and 'side_logits'."
                 )
 
             pred = torch.argmax(logits, dim=1)
@@ -583,7 +636,7 @@ def inference(
                 labels,
             )
 
-            side_targets = build_side_presence_targets(labels).to(
+            side_targets = build_side_tumor_cyst_targets(labels).to(
                 device=side_logits.device,
                 dtype=side_logits.dtype,
             )
@@ -593,13 +646,20 @@ def inference(
                 side_targets=side_targets,
             )
 
-    class_metrics_df, class_mean_metrics = class_metrics_from_confusion_matrix(class_cm, CLASS_NAMES)
-    hec_metrics_df, hec_mean_metrics = hec_metrics_from_counts(hec_counts)
-    side_metrics_df, side_mean_metrics = side_tracker.compute()
+    class_metrics_df, class_mean_metrics = class_metrics_from_confusion_matrix(
+        class_cm, CLASS_NAMES
+    )
+
+    hec_metrics_df, hec_mean_metrics = hec_metrics_from_counts(
+        hec_counts
+    )
+
+    side_mean_metrics = side_tracker.compute()
+    side_metrics_df = side_tracker.to_dataframe()
 
     class_metrics_path = os.path.join(result_dir, "metrics_classwise.csv")
     hec_metrics_path = os.path.join(result_dir, "metrics_hec.csv")
-    side_metrics_path = os.path.join(result_dir, "metrics_side_classifier.csv")
+    side_metrics_path = os.path.join(result_dir, "metrics_side_tumor_classifier.csv")
 
     class_metrics_df.to_csv(class_metrics_path, index=False)
     hec_metrics_df.to_csv(hec_metrics_path, index=False)
@@ -619,6 +679,12 @@ def inference(
         save_path=os.path.join(result_dir, "confusion_matrix_classwise.png"),
     )
     save_hec_confusion_matrices(hec_counts, result_dir)
+    side_metrics_df = side_tracker.to_dataframe()
+    side_metrics_path = os.path.join(
+        result_dir,
+        "metrics_side_tumor_cyst_classifier.csv",
+    )
+    side_tracker.save_confusion_matrices(result_dir)
     side_metrics_df.to_csv(side_metrics_path, index=False)
 
     print("\n==============================")
@@ -646,27 +712,44 @@ def inference(
     print(f"- {os.path.join(result_dir, 'confusion_matrix_hec_summary.csv')}")
 
     print("\n==============================")
-    print("SIDE-AWARE CLASSIFIER METRICS")
+    print("SIDE-AWARE TUMOR/CYST CLASSIFIER METRICS")
     print("==============================")
 
     for _, row in side_metrics_df.iterrows():
-        print(
-            f"{row['class']:>12} | "
-            f"F1: {row['f1']:.6f} | "
-            f"Precision: {row['precision']:.6f} | "
-            f"Recall: {row['recall']:.6f} | "
-            f"Accuracy: {row['accuracy']:.6f} | "
-            f"GT positive rate: {row['true_positive_rate']:.6f} | "
-            f"Pred positive rate: {row['predicted_positive_rate']:.6f}"
-        )
+        class_name = row["class"]
+
+        if class_name in SIDE_CLASS_NAMES:
+            print(
+                f"{class_name:>12} | "
+                f"F1: {row['f1']:.6f} | "
+                f"Precision: {row['precision']:.6f} | "
+                f"Recall: {row['recall']:.6f} | "
+                f"Accuracy: {row['accuracy']:.6f} | "
+                f"GT positive rate: {row['gt_positive_rate']:.6f} | "
+                f"Pred positive rate: {row['pred_positive_rate']:.6f}"
+            )
 
     print(
-        f"\nSide Classifier Mean | "
-        f"F1: {side_mean_metrics['mean_f1']:.6f} | "
-        f"Precision: {side_mean_metrics['mean_precision']:.6f} | "
-        f"Recall: {side_mean_metrics['mean_recall']:.6f} | "
-        f"Accuracy: {side_mean_metrics['mean_accuracy']:.6f}"
+        f"\nTumor Side Mean | "
+        f"F1: {side_tracker.compute()['tumor_mean_f1']:.6f} | "
+        f"Precision: {side_tracker.compute()['tumor_mean_precision']:.6f} | "
+        f"Recall: {side_tracker.compute()['tumor_mean_recall']:.6f}"
+    )
+
+    print(
+        f"Cyst Side Mean  | "
+        f"F1: {side_tracker.compute()['cyst_mean_f1']:.6f} | "
+        f"Precision: {side_tracker.compute()['cyst_mean_precision']:.6f} | "
+        f"Recall: {side_tracker.compute()['cyst_mean_recall']:.6f}"
+    )
+
+    print(
+        f"All Side Mean   | "
+        f"F1: {side_tracker.compute()['mean_f1']:.6f} | "
+        f"Precision: {side_tracker.compute()['mean_precision']:.6f} | "
+        f"Recall: {side_tracker.compute()['mean_recall']:.6f} | "
+        f"Accuracy: {side_tracker.compute()['mean_accuracy']:.6f}"
     )
 
     print(f"- {side_metrics_path}")
-    print(f"- {os.path.join(result_dir, 'confusion_matrix_side_classifier_summary.csv')}")
+    print(f"- {os.path.join(result_dir, 'confusion_matrix_side_tumor_cyst_summary.csv')}")

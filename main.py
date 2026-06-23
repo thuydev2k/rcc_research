@@ -220,7 +220,7 @@ inference(
     test_dataset=test_dataset,
     device=device,
     out_classes=4,
-    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_SideContext_Exp1_model/best_model_side_context_exp1.pt",
-    result_dir="./result_BiomedCLIP_UNet_CTEHR_SideContext_Exp1",
+    checkpoint_path="./saved_BiomedCLIP_UNet_CTEHR_SideTumor_Exp2_Dynamic_model/best_model_side_tumor_cyst_exp2_dynamic.pt",
+    result_dir="./result_BiomedCLIP_UNet_CTEHR_SideTumor_Cyst_Dynamic",
     save_visuals=True,
 )
