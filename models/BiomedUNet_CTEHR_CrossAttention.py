@@ -148,11 +148,11 @@ class CTEHRCrossAttention(nn.Module):
         return fused_feat
 
 
-class MultiScaleSideAwareTumorContextHead(nn.Module):
+class MultiScaleSideAwareTumorCystContextHead(nn.Module):
     """
-    Multi-scale side-aware tumor classifier.
+    Multi-scale side-aware tumor/cyst classifier.
 
-    It uses:
+    Uses:
         skip1      [B, 128, 224, 224]
         skip2      [B, 256, 112, 112]
         skip3      [B, 512, 56, 56]
@@ -160,11 +160,13 @@ class MultiScaleSideAwareTumorContextHead(nn.Module):
         bottleneck [B, 512, 14, 14]
 
     Output:
-        side_logits [B, 2]
+        side_logits [B, 4]
 
     Logit order:
         0 = image-left tumor presence
-        1 = image-right tumor presence
+        1 = image-left cyst presence
+        2 = image-right tumor presence
+        3 = image-right cyst presence
     """
 
     def __init__(
@@ -199,13 +201,16 @@ class MultiScaleSideAwareTumorContextHead(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # Shared classifier for image-left and image-right tumor presence.
+        # Shared classifier for left/right side.
+        # For each side, output:
+        #   0 = tumor
+        #   1 = cyst
         self.side_classifier = nn.Sequential(
             nn.LayerNorm(fused_dim),
             nn.Linear(fused_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, 2),
         )
 
     def _pool_global_left_right(self, feat):
@@ -247,48 +252,52 @@ class MultiScaleSideAwareTumorContextHead(nn.Module):
         left_feat = self.region_fuser(left_concat)      # [B, 512]
         right_feat = self.region_fuser(right_concat)    # [B, 512]
 
-        left_tumor_logit = self.side_classifier(left_feat)    # [B, 1]
-        right_tumor_logit = self.side_classifier(right_feat)  # [B, 1]
+        left_logits = self.side_classifier(left_feat)    # [B, 2] tumor, cyst
+        right_logits = self.side_classifier(right_feat)  # [B, 2] tumor, cyst
 
         side_logits = torch.cat(
             [
-                left_tumor_logit,
-                right_tumor_logit,
+                left_logits[:, 0:1],   # left tumor
+                left_logits[:, 1:2],   # left cyst
+                right_logits[:, 0:1],  # right tumor
+                right_logits[:, 1:2],  # right cyst
             ],
             dim=1,
-        )  # [B, 2]
+        )  # [B, 4]
 
         return side_logits, global_feat, left_feat, right_feat
 
 
-class SemanticTumorContextTokenGenerator(nn.Module):
+class SemanticTumorCystContextTokenGenerator(nn.Module):
     """
-    Generate 3 semantic context tokens from:
+    Generate 5 semantic context tokens from:
         global feature
         image-left feature
         image-right feature
-        detached side tumor probabilities
+        detached side tumor/cyst probabilities
 
     Input:
         global_feat         [B, 512]
         left_feat           [B, 512]
         right_feat          [B, 512]
-        side_context_values [B, 2]
+        side_context_values [B, 4]
 
     Output:
-        context_tokens [B, 3, context_dim]
+        context_tokens [B, 5, context_dim]
 
     Token meaning:
         0 = global token
         1 = left tumor token
-        2 = right tumor token
+        2 = left cyst token
+        3 = right tumor token
+        4 = right cyst token
     """
 
     def __init__(
         self,
         feature_dim: int = 512,
-        num_side_values: int = 2,
-        num_context_tokens: int = 3,
+        num_side_values: int = 4,
+        num_context_tokens: int = 5,
         context_dim: int = 128,
         hidden_dim: int = 256,
         dropout: float = 0.10,
@@ -445,9 +454,11 @@ class SideMaskedContextCrossAttention2D(nn.Module):
         # Token indices:
         # 0 = global
         # 1 = left tumor
-        # 2 = right tumor
-        left_context = context_tokens[:, [0, 1], :]
-        right_context = context_tokens[:, [0, 2], :]
+        # 2 = left cyst
+        # 3 = right tumor
+        # 4 = right cyst
+        left_context = context_tokens[:, [0, 1, 2], :]
+        right_context = context_tokens[:, [0, 3, 4], :]
 
         left_out = self._attend_half(left_feat, left_context)
         right_out = self._attend_half(right_feat, right_context)
@@ -456,109 +467,6 @@ class SideMaskedContextCrossAttention2D(nn.Module):
 
         return out
     
-
-class ContextCrossAttention2D(nn.Module):
-    """
-    Fuse semantic context tokens into 2D image features.
-
-    image_feat:
-        [B, C, H, W]
-
-    context_tokens:
-        [B, T, D]
-
-    output:
-        [B, C, H, W]
-
-    Logic:
-        image tokens are queries.
-        context tokens are keys and values.
-    """
-
-    def __init__(
-        self,
-        image_dim: int,
-        context_dim: int = 128,
-        num_heads: int = 8,
-        dropout: float = 0.10,
-        ffn_ratio: float = 2.0,
-    ):
-        super().__init__()
-
-        if image_dim % num_heads != 0:
-            raise ValueError(
-                f"image_dim={image_dim} must be divisible by num_heads={num_heads}"
-            )
-
-        self.image_norm = nn.LayerNorm(image_dim)
-        self.context_norm = nn.LayerNorm(context_dim)
-
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=image_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True,
-            kdim=context_dim,
-            vdim=context_dim,
-        )
-
-        self.attn_dropout = nn.Dropout(dropout)
-
-        hidden_dim = int(image_dim * ffn_ratio)
-
-        self.ffn_norm = nn.LayerNorm(image_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(image_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, image_dim),
-            nn.Dropout(dropout),
-        )
-
-        # Start close to the original image feature.
-        self.attn_scale = nn.Parameter(torch.ones(1) * 1e-4)
-        self.ffn_scale = nn.Parameter(torch.ones(1) * 1e-4)
-
-    def forward(self, image_feat, context_tokens):
-        B, C, H, W = image_feat.shape
-
-        image_tokens = image_feat.flatten(2).transpose(1, 2)
-
-        query = self.image_norm(image_tokens)
-        key_value = self.context_norm(context_tokens)
-
-        attn_out, _ = self.cross_attn(
-            query=query,
-            key=key_value,
-            value=key_value,
-            need_weights=False,
-        )
-
-        image_tokens = image_tokens + self.attn_scale * self.attn_dropout(attn_out)
-
-        ffn_out = self.ffn(self.ffn_norm(image_tokens))
-        image_tokens = image_tokens + self.ffn_scale * ffn_out
-
-        fused_feat = image_tokens.transpose(1, 2).reshape(B, C, H, W)
-
-        return fused_feat
-    
-class BottleneckRegionContextPool(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        self.pool = nn.AdaptiveAvgPool2d(1)
-
-    def forward(self, bottleneck_feat):
-        B, C, H, W = bottleneck_feat.shape
-        mid = W // 2
-
-        global_feat = self.pool(bottleneck_feat).flatten(1)
-        left_feat = self.pool(bottleneck_feat[:, :, :, :mid]).flatten(1)
-        right_feat = self.pool(bottleneck_feat[:, :, :, mid:]).flatten(1)
-
-        return global_feat, left_feat, right_feat
-
 
 class BiomedCLIPUNetCTEHRAttention(nn.Module):
     """
@@ -625,7 +533,7 @@ class BiomedCLIPUNetCTEHRAttention(nn.Module):
 
         # ---------- Side-aware context branch ----------
         # ---------- Side-aware tumor context branch ----------
-        self.side_context_head = MultiScaleSideAwareTumorContextHead(
+        self.side_context_head = MultiScaleSideAwareTumorCystContextHead(
             scale_channels=(128, 256, 512, 1024, 512),
             scale_embed_dim=128,
             fused_dim=512,
@@ -633,14 +541,19 @@ class BiomedCLIPUNetCTEHRAttention(nn.Module):
             dropout=0.10,
         )
 
-        self.bottleneck_context_pool = BottleneckRegionContextPool()
-
-        self.context_token_generator = SemanticTumorContextTokenGenerator(
+        self.context_token_generator = SemanticTumorCystContextTokenGenerator(
             feature_dim=512,
-            num_side_values=2,
-            num_context_tokens=3,
+            num_side_values=4,
+            num_context_tokens=5,
             context_dim=context_dim,
             hidden_dim=256,
+            dropout=0.10,
+        )
+
+        self.context_fuse_bottleneck = SideMaskedContextCrossAttention2D(
+            image_dim=512,
+            context_dim=context_dim,
+            num_heads=num_heads,
             dropout=0.10,
         )
 
@@ -721,10 +634,8 @@ class BiomedCLIPUNetCTEHRAttention(nn.Module):
             x = self.ct_ehr_attention(x, clinical_vector)
 
 
-        bottleneck_ct_ehr = x
-
-        side_logits, _, _, _ = self.side_context_head(
-            bottleneck=bottleneck_ct_ehr,
+        side_logits, global_feat, left_feat, right_feat = self.side_context_head(
+            bottleneck=x,
             skip1=skip1,
             skip2=skip2,
             skip3=skip3,
@@ -733,8 +644,6 @@ class BiomedCLIPUNetCTEHRAttention(nn.Module):
 
         side_context_values = torch.sigmoid(side_logits.detach())
 
-        global_feat, left_feat, right_feat = self.bottleneck_context_pool(bottleneck_ct_ehr)
-
         context_tokens = self.context_token_generator(
             global_feat=global_feat,
             left_feat=left_feat,
@@ -742,6 +651,7 @@ class BiomedCLIPUNetCTEHRAttention(nn.Module):
             side_context_values=side_context_values,
         )
 
+        x = self.context_fuse_bottleneck(x, context_tokens)
 
         # ---------- Side-masked context fusion ----------
         skip4 = self.context_fuse_skip4(skip4, context_tokens)
